@@ -1,0 +1,6 @@
+{
+  "name": "PageLay",
+  "description": "Simple page layouts. No fuss. A lightweight, physically accurate web-based desktop publishing and page layout editor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
