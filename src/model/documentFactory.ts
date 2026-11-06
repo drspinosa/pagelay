@@ -67,6 +67,8 @@ export function createNewDocument(
     snapToGuides: true,
     snapToPageEdges: true,
     snapToObjects: true,
+    angleSnapIncrementDeg: 15,
+    precisionMode: false,
     pages: [createBlankPage(1)],
     assets: {},
   };

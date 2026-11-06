@@ -13,8 +13,11 @@ All operations run locally in your browser with zero external cloud dependencies
 ### 1. Canonical Millimetre (`mm`) Layout Engine
 - **Physical ISO Paper Sizes**: Full support for **A0** (`1189 × 841 mm` default), **A1**, **A2**, **A3**, **A4**, and **Custom** millimetre dimensions in both **Landscape** and **Portrait** orientations.
 - **Zoom-Invariant Rendering**: The internal document page is laid out at a canonical 1:1 physical scale and GPU-scaled (`transform: scale(zoom)`), guaranteeing identical text wrapping, font metrics, and vector geometry at 7% mobile zoom, 25% laptop overview, or 200% detail inspection.
-- **Interactive Millimetre Rulers & Guidelines**: Top and left rulers adapt tick intervals (`1 mm` to `100 mm`) dynamically with zoom. Drag horizontal or vertical non-printing guidelines directly onto the page, add exact millimetre positions, or generate 1-click page margin guides (`20 mm` / `40 mm`).
-- **Magnetic Snapping (Guidelines, Page Edges & Objects)**: Snap objects and endpoints to guidelines, physical page edges/centers, and the edges or centers of other objects on the page with live visual snap-line indicators and a quick **Snap Objects** toggle in the Top Toolbar.
+- **Interactive Millimetre Rulers & Guidelines**: Top and left rulers adapt tick intervals (`1 mm` to `100 mm`) dynamically with zoom. Drag horizontal or vertical non-printing guidelines directly onto the page (`Shift + Drag` constrains movement to exact `1 mm` increments), click any guideline or its entry in the Properties Panel to edit its exact decimal `X` or `Y` coordinate (`0.1 mm`+ precision), or generate 1-click page margin guides (`20 mm` / `40 mm`).
+- **Magnetic Snapping, Configurable Angle Snapping & Precision Mode**:
+  - **Magnetic Snapping**: Snap objects and endpoints to guidelines, physical page edges/centers, and the edges or centers of other objects with live visual snap-line indicators and a quick **Snap Objects** toggle.
+  - **Configurable Angle Snapping (`1°`–`45°`)**: Choose quick presets (`1°`, `5°`, `10°`, `15°`, `30°`, `45°`) or enter any custom whole-number increment (`1°`–`45°`, default `15°`) in the **Guides & Snap** menu. Holding `Shift` during object rotation or while drawing/adjusting Lines, Arrows, and Dimensions constrains the angle to the selected increment (plus exact horizontal/vertical axes).
+  - **Touch Precision Mode**: Optional toggle in the **Guides & Snap** menu that enables `1 mm` guideline snapping, angle-constrained line/arrow/dimension drawing, and angle-constrained rotation on phones and tablets without needing a physical `Shift` key.
 
 ### 2. Lossless Image Handling & Non-Destructive Cropping
 - **Zero Re-encoding on Import**: Uploaded JPEG, PNG, and WebP images are stored in memory as untouched binary bytes (`Uint8Array`).
@@ -24,9 +27,9 @@ All operations run locally in your browser with zero external cloud dependencies
 ### 3. Rich Layout & Annotation Tools
 - **Text Boxes**: Multi-line text boxes with font family selection (PDF-guaranteed standard fonts + system fonts), point size (`pt`), bold/italic/underline, alignment, text colour, fill colour, border thickness (`mm`), and internal padding (`mm`).
 - **Technical Lines, Callout Arrows & Dimensions**:
-  - **Lines**: Solid, dashed, or dotted lines with exact `X1, Y1` and `X2, Y2` millimetre coordinates.
-  - **Callout Arrows**: Configurable arrowheads (Single `→`, Double `↔`, or Start `←`) and head size in `mm`.
-  - **Dimension Lines**: Architectural dimension lines with witness ticks and live physical length readouts in `mm` (or custom label overrides).
+  - **Lines**: Solid, dashed, or dotted lines with exact `X1, Y1` and `X2, Y2` millimetre coordinates and `Shift`-constrained angle drawing/endpoint adjustment.
+  - **Callout Arrows**: Configurable arrowheads (Single `→`, Double `↔`, or Start `←`), head size in `mm`, and `Shift`-constrained angle drawing/endpoint adjustment.
+  - **Dimension Lines**: Architectural dimension lines with witness ticks, live physical document length readouts in `mm` (or custom label overrides), and `Shift`-constrained angle drawing/endpoint adjustment.
 - **Geometric Shapes & Translucent Highlights**: Rectangles, squares, ellipses, circles, triangles, and 1-click translucent highlighter overlays (Yellow, Green, Cyan, Pink).
 
 ### 4. Multi-Selection, Object Grouping, Alignment & Z-Order

@@ -8,7 +8,7 @@
  * or Document & Page Setup when no object is selected.
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlignLeft,
   AlignCenter,
@@ -41,6 +41,8 @@ import {
   Ungroup,
   CheckSquare,
   Square,
+  Check,
+  X,
 } from 'lucide-react';
 import {
   AVAILABLE_FONTS,
@@ -86,7 +88,10 @@ interface PropertiesPanelProps {
     widthMm: number,
     heightMm: number
   ) => void;
+  selectedGuideId: string | null;
+  onSelectGuide: (guideId: string | null) => void;
   onAddGuideline: (orientation: 'horizontal' | 'vertical', positionMm: number) => void;
+  onUpdateGuideline: (guideId: string, positionMm: number) => void;
   onRemoveGuideline: (guideId: string) => void;
   onAddMarginGuides: (marginMm: number) => void;
 }
@@ -118,16 +123,89 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   onDuplicateObject,
   onReorderObject,
   onUpdateDocumentSize,
+  selectedGuideId,
+  onSelectGuide,
   onAddGuideline,
+  onUpdateGuideline,
   onRemoveGuideline,
   onAddMarginGuides,
 }) => {
   const [newGuideOrientation, setNewGuideOrientation] = useState<'vertical' | 'horizontal'>('vertical');
   const [newGuidePosMm, setNewGuidePosMm] = useState<string>('50');
+  const [newGuideError, setNewGuideError] = useState<string | null>(null);
+  const [editingGuideId, setEditingGuideId] = useState<string | null>(null);
+  const [editingGuideText, setEditingGuideText] = useState<string>('');
+  const [guideEditError, setGuideEditError] = useState<string | null>(null);
   const [isAlignMenuOpen, setIsAlignMenuOpen] = useState<boolean>(false);
 
   const activePage = doc.pages[activePageIndex];
   const pageObjects = activePage ? activePage.objects : [];
+
+  // Sync inline editor when a guideline is selected on the canvas
+  useEffect(() => {
+    if (!selectedGuideId || !activePage) return;
+    const found = activePage.guidelines.find((g) => g.id === selectedGuideId);
+    if (found) {
+      setEditingGuideId(found.id);
+      setEditingGuideText(String(formatMm(found.positionMm, 2)));
+      setGuideEditError(null);
+    }
+  }, [selectedGuideId, activePage]);
+
+  const startEditingGuide = (guide: Guideline) => {
+    onSelectGuide(guide.id);
+    setEditingGuideId(guide.id);
+    setEditingGuideText(String(formatMm(guide.positionMm, 2)));
+    setGuideEditError(null);
+  };
+
+  const cancelEditingGuide = () => {
+    setEditingGuideId(null);
+    setGuideEditError(null);
+  };
+
+  const commitEditingGuide = (guide: Guideline) => {
+    const trimmed = editingGuideText.trim();
+    const maxMm = guide.orientation === 'vertical' ? doc.widthMm : doc.heightMm;
+    const axisLabel = guide.orientation === 'vertical' ? 'X' : 'Y';
+
+    if (trimmed === '' || !/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      setGuideEditError(`Enter a valid numeric ${axisLabel} position in mm.`);
+      return;
+    }
+
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > maxMm) {
+      setGuideEditError(
+        `${axisLabel} must be within page bounds (0 to ${formatMm(maxMm, 1)} mm).`
+      );
+      return;
+    }
+
+    onUpdateGuideline(guide.id, formatMm(parsed, 2));
+    setEditingGuideId(null);
+    setGuideEditError(null);
+  };
+
+  const handleCreateGuidelineFromInput = () => {
+    const trimmed = newGuidePosMm.trim();
+    const maxMm = newGuideOrientation === 'vertical' ? doc.widthMm : doc.heightMm;
+    const axisLabel = newGuideOrientation === 'vertical' ? 'X' : 'Y';
+
+    if (trimmed === '' || !/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      setNewGuideError(`Enter a valid numeric ${axisLabel} position in mm.`);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > maxMm) {
+      setNewGuideError(
+        `${axisLabel} must be within page bounds (0 to ${formatMm(maxMm, 1)} mm).`
+      );
+      return;
+    }
+    setNewGuideError(null);
+    onAddGuideline(newGuideOrientation, formatMm(parsed, 2));
+  };
 
   const toggleObjectInSelection = (objId: string) => {
     if (selectedObjectIds.includes(objId)) {
@@ -460,41 +538,54 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
             </div>
 
             <p className="text-[11px] text-slate-500 leading-relaxed">
-              Drag directly from the top or left millimetre rulers, or add an exact guideline position below.
+              Drag from the rulers (hold <strong>Shift</strong> for 1 mm steps), add a new guide, or click any existing guide below to edit its exact X/Y position.
             </p>
 
-            <div className="flex items-center gap-1.5">
-              <select
-                value={newGuideOrientation}
-                onChange={(e) =>
-                  setNewGuideOrientation(e.target.value as 'vertical' | 'horizontal')
-                }
-                className="px-2 py-1 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700"
-              >
-                <option value="vertical">Vertical (X)</option>
-                <option value="horizontal">Horizontal (Y)</option>
-              </select>
-              <input
-                type="number"
-                step={1}
-                value={newGuidePosMm}
-                onChange={(e) => setNewGuidePosMm(e.target.value)}
-                className="w-20 px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
-                placeholder="mm"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  const pos = parseFloat(newGuidePosMm);
-                  if (!isNaN(pos)) {
-                    onAddGuideline(newGuideOrientation, pos);
-                  }
-                }}
-                className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-medium flex items-center gap-1"
-              >
-                <Plus className="w-3 h-3" />
-                <span>Add</span>
-              </button>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={newGuideOrientation}
+                  onChange={(e) => {
+                    setNewGuideOrientation(e.target.value as 'vertical' | 'horizontal');
+                    setNewGuideError(null);
+                  }}
+                  className="px-2 py-1 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700"
+                >
+                  <option value="vertical">Vertical (X)</option>
+                  <option value="horizontal">Horizontal (Y)</option>
+                </select>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={newGuidePosMm}
+                  onChange={(e) => {
+                    setNewGuidePosMm(e.target.value);
+                    if (newGuideError) setNewGuideError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleCreateGuidelineFromInput();
+                    }
+                  }}
+                  className="w-20 px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600"
+                  placeholder="mm"
+                  aria-label="New guideline position in millimetres"
+                />
+                <button
+                  type="button"
+                  onClick={handleCreateGuidelineFromInput}
+                  className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-medium flex items-center gap-1"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add</span>
+                </button>
+              </div>
+              {newGuideError && (
+                <div className="text-[10px] text-rose-600 font-medium">
+                  {newGuideError}
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -514,27 +605,114 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               </button>
             </div>
 
+            {guideEditError && (
+              <div className="p-2 bg-rose-50 border border-rose-200 rounded text-[11px] text-rose-700">
+                {guideEditError}
+              </div>
+            )}
+
             {activePage && activePage.guidelines.length > 0 && (
-              <div className="max-h-44 overflow-y-auto border border-slate-200 rounded divide-y divide-slate-100">
-                {activePage.guidelines.map((g: Guideline) => (
-                  <div
-                    key={g.id}
-                    className="px-2.5 py-1.5 flex items-center justify-between text-[11px]"
-                  >
-                    <span className="font-mono text-slate-700">
-                      {g.orientation === 'vertical' ? 'X (Vert)' : 'Y (Horiz)'}:{' '}
-                      <strong>{formatMm(g.positionMm)} mm</strong>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => onRemoveGuideline(g.id)}
-                      className="text-slate-400 hover:text-rose-600"
-                      title="Remove guideline"
+              <div className="max-h-52 overflow-y-auto border border-slate-200 rounded divide-y divide-slate-100">
+                {activePage.guidelines.map((g: Guideline) => {
+                  const isEditingThis = editingGuideId === g.id;
+                  const isSelectedThis = selectedGuideId === g.id;
+                  const axisLabel = g.orientation === 'vertical' ? 'X' : 'Y';
+                  const typeLabel =
+                    g.orientation === 'vertical' ? 'Vertical guide' : 'Horizontal guide';
+
+                  return (
+                    <div
+                      key={g.id}
+                      onClick={() => {
+                        if (!isEditingThis) {
+                          startEditingGuide(g);
+                        }
+                      }}
+                      className={`px-2.5 py-1.5 flex items-center justify-between gap-1.5 text-[11px] transition-colors ${
+                        isSelectedThis || isEditingThis
+                          ? 'bg-cyan-50/70'
+                          : 'hover:bg-slate-50 cursor-pointer'
+                      }`}
                     >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
+                      {isEditingThis ? (
+                        <div
+                          className="flex items-center gap-1 flex-1 min-w-0"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <span className="text-slate-600 font-medium whitespace-nowrap">
+                            {typeLabel} — {axisLabel}:
+                          </span>
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            autoFocus
+                            value={editingGuideText}
+                            onChange={(e) => {
+                              setEditingGuideText(e.target.value);
+                              if (guideEditError) setGuideEditError(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                commitEditingGuide(g);
+                              } else if (e.key === 'Escape') {
+                                e.preventDefault();
+                                cancelEditingGuide();
+                              }
+                            }}
+                            className="w-16 px-1.5 py-0.5 bg-white border border-cyan-500 rounded font-mono text-xs text-slate-900 focus:outline-none"
+                            aria-label={`${typeLabel} ${axisLabel} position in mm`}
+                          />
+                          <span className="font-mono text-[10px] text-slate-500">mm</span>
+                          <button
+                            type="button"
+                            onClick={() => commitEditingGuide(g)}
+                            className="p-0.5 text-emerald-600 hover:bg-emerald-50 rounded"
+                            title="Apply position (Enter)"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEditingGuide}
+                            className="p-0.5 text-slate-400 hover:text-slate-700 rounded"
+                            title="Cancel edit (Escape)"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startEditingGuide(g);
+                          }}
+                          className="text-left flex-1 min-w-0 truncate text-slate-700 hover:text-cyan-800"
+                          title="Click to edit exact millimetre position"
+                        >
+                          <span>{typeLabel} — </span>
+                          <span className="font-mono">
+                            {axisLabel}: <strong>{formatMm(g.positionMm, 2)} mm</strong>
+                          </span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (editingGuideId === g.id) cancelEditingGuide();
+                          onRemoveGuideline(g.id);
+                        }}
+                        className="text-slate-400 hover:text-rose-600 shrink-0"
+                        title="Remove guideline"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

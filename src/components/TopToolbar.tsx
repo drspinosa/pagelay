@@ -10,7 +10,7 @@
  * - Row 2 (Tool Strip): Horizontally scrollable with native touch-scroll-x on narrow screens.
  */
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   FilePlus2,
   FolderOpen,
@@ -40,6 +40,8 @@ import {
   PanelLeft,
   SlidersHorizontal,
   FolderClosed,
+  Compass,
+  Crosshair,
 } from 'lucide-react';
 import { HIGHLIGHT_PRESETS, ToolType } from '../model/documentTypes';
 
@@ -64,11 +66,15 @@ interface TopToolbarProps {
   snapToGuides: boolean;
   snapToPageEdges: boolean;
   snapToObjects: boolean;
+  angleSnapIncrementDeg: number;
+  precisionMode: boolean;
   onToggleShowGuides: () => void;
   onToggleLockGuides: () => void;
   onToggleSnapToGuides: () => void;
   onToggleSnapToPageEdges: () => void;
   onToggleSnapToObjects: () => void;
+  onChangeAngleSnapIncrement: (deg: number) => void;
+  onTogglePrecisionMode: () => void;
   onClearGuides: () => void;
   onOpenExportModal: (defaultTab: 'pdf' | 'image') => void;
   isPagesOpen: boolean;
@@ -77,6 +83,8 @@ interface TopToolbarProps {
   onToggleProperties: () => void;
   hasSelectedObject: boolean;
 }
+
+const ANGLE_SNAP_PRESETS = [1, 5, 10, 15, 30, 45] as const;
 
 export const TopToolbar: React.FC<TopToolbarProps> = ({
   documentName,
@@ -99,11 +107,15 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   snapToGuides,
   snapToPageEdges,
   snapToObjects,
+  angleSnapIncrementDeg,
+  precisionMode,
   onToggleShowGuides,
   onToggleLockGuides,
   onToggleSnapToGuides,
   onToggleSnapToPageEdges,
   onToggleSnapToObjects,
+  onChangeAngleSnapIncrement,
+  onTogglePrecisionMode,
   onClearGuides,
   onOpenExportModal,
   isPagesOpen,
@@ -118,6 +130,28 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   const [openMenu, setOpenMenu] = useState<
     'file' | 'shape' | 'highlight' | 'guides' | null
   >(null);
+  const [angleInputText, setAngleInputText] = useState<string>(
+    String(angleSnapIncrementDeg)
+  );
+
+  useEffect(() => {
+    setAngleInputText(String(angleSnapIncrementDeg));
+  }, [angleSnapIncrementDeg]);
+
+  const commitAngleInput = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      setAngleInputText(String(angleSnapIncrementDeg));
+      return;
+    }
+    const parsed = parseInt(trimmed, 10);
+    if (isNaN(parsed) || parsed < 1 || parsed > 45) {
+      setAngleInputText(String(angleSnapIncrementDeg));
+      return;
+    }
+    onChangeAngleSnapIncrement(parsed);
+    setAngleInputText(String(parsed));
+  };
 
   const toggleMenu = (menu: 'file' | 'shape' | 'highlight' | 'guides') => {
     setOpenMenu((prev) => (prev === menu ? null : menu));
@@ -543,10 +577,24 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         <button
           type="button"
           onClick={() => toggleMenu('guides')}
-          className="px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-white rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 border ${
+            precisionMode
+              ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-2xs'
+              : 'text-slate-700 hover:bg-white border-transparent'
+          }`}
+          title={
+            precisionMode
+              ? `Guides & Snap — Precision Mode ON (1 mm guides & ${angleSnapIncrementDeg}° angle snap)`
+              : `Guides & Snap (Angle snap: ${angleSnapIncrementDeg}°)`
+          }
         >
           <Grid className="w-3.5 h-3.5 text-cyan-600" />
           <span>Guides & Snap</span>
+          {precisionMode && (
+            <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-mono text-[10px] font-semibold leading-none">
+              Precision
+            </span>
+          )}
           <ChevronDown className="w-3 h-3 text-slate-400" />
         </button>
       </div>
@@ -672,47 +720,11 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
       )}
 
       {openMenu === 'guides' && (
-        <div className="absolute right-2 sm:right-24 top-21 w-60 max-w-[calc(100vw-16px)] bg-white border border-slate-200 rounded-lg shadow-xl py-1.5 z-50 text-xs">
-          <div className="px-3 py-1 text-[11px] font-semibold text-slate-400">
-            Rulers & Millimetre Guidelines
-          </div>
-          <button
-            type="button"
-            onClick={onToggleShowGuides}
-            className="w-full px-3 py-2 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
-          >
-            <span className="flex items-center gap-2">
-              {showGuides ? (
-                <Eye className="w-3.5 h-3.5 text-cyan-600" />
-              ) : (
-                <EyeOff className="w-3.5 h-3.5 text-slate-400" />
-              )}
-              <span>Show Guidelines</span>
-            </span>
-            <span className="font-mono text-[11px] text-slate-500">
-              {showGuides ? 'ON' : 'OFF'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggleLockGuides}
-            className="w-full px-3 py-2 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
-          >
-            <span className="flex items-center gap-2">
-              {lockGuides ? (
-                <Lock className="w-3.5 h-3.5 text-amber-600" />
-              ) : (
-                <Unlock className="w-3.5 h-3.5 text-slate-400" />
-              )}
-              <span>Lock Guidelines</span>
-            </span>
-            <span className="font-mono text-[11px] text-slate-500">
-              {lockGuides ? 'LOCKED' : 'OFF'}
-            </span>
-          </button>
-
-          <div className="my-1 border-t border-slate-100" />
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="absolute right-2 sm:right-24 top-21 w-72 max-w-[calc(100vw-16px)] max-h-[calc(100dvh-92px)] touch-scroll-y bg-white border border-slate-200 rounded-lg shadow-xl py-1.5 z-50 text-xs"
+        >
+          {/* GROUP 1: MAGNETIC SNAPPING */}
           <div className="px-3 py-1 text-[11px] font-semibold text-slate-400">
             Magnetic Snapping
           </div>
@@ -720,7 +732,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <button
             type="button"
             onClick={onToggleSnapToGuides}
-            className="w-full px-3 py-2 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
+            className="w-full px-3 py-1.5 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
           >
             <span className="flex items-center gap-2">
               <Magnet
@@ -738,7 +750,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <button
             type="button"
             onClick={onToggleSnapToPageEdges}
-            className="w-full px-3 py-2 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
+            className="w-full px-3 py-1.5 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
           >
             <span className="flex items-center gap-2">
               <Magnet
@@ -756,7 +768,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <button
             type="button"
             onClick={onToggleSnapToObjects}
-            className="w-full px-3 py-2 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
+            className="w-full px-3 py-1.5 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
           >
             <span className="flex items-center gap-2">
               <Magnet
@@ -771,6 +783,156 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             </span>
           </button>
 
+          {/* GROUP 2: ANGLE SNAPPING */}
+          <div className="my-1.5 border-t border-slate-100" />
+          <div className="px-3 py-1 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5">
+                <Compass className="w-3.5 h-3.5 text-blue-600" />
+                <span>Angle Snapping</span>
+              </span>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min={1}
+                  max={45}
+                  step={1}
+                  value={angleInputText}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setAngleInputText(val);
+                    if (/^\d+$/.test(val.trim())) {
+                      const num = parseInt(val.trim(), 10);
+                      if (num >= 1 && num <= 45) {
+                        onChangeAngleSnapIncrement(num);
+                      }
+                    }
+                  }}
+                  onBlur={() => commitAngleInput(angleInputText)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      commitAngleInput(angleInputText);
+                      (e.target as HTMLInputElement).blur();
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setAngleInputText(String(angleSnapIncrementDeg));
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                  className="w-12 px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-right text-slate-800 focus:outline-none focus:border-blue-600"
+                  title="Enter whole-number angle increment between 1° and 45°"
+                  aria-label="Angle snap increment in degrees"
+                />
+                <span className="text-[11px] font-mono text-slate-500">°</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-6 gap-1">
+              {ANGLE_SNAP_PRESETS.map((preset) => {
+                const isActive = angleSnapIncrementDeg === preset;
+                return (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => {
+                      onChangeAngleSnapIncrement(preset);
+                      setAngleInputText(String(preset));
+                    }}
+                    className={`py-1 rounded font-mono text-[11px] font-medium border transition-colors ${
+                      isActive
+                        ? 'bg-blue-600 text-white border-blue-600'
+                        : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    {preset}°
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="text-[10px] text-slate-500 flex items-center justify-between">
+              <span>Keyboard: Hold Shift</span>
+              <span className="font-mono text-slate-600">
+                1°–45° (Current: {angleSnapIncrementDeg}°)
+              </span>
+            </div>
+          </div>
+
+          {/* GROUP 3: PRECISION */}
+          <div className="my-1.5 border-t border-slate-100" />
+          <div className="px-3 py-1 text-[11px] font-semibold text-slate-400">
+            Precision
+          </div>
+
+          <button
+            type="button"
+            onClick={onTogglePrecisionMode}
+            className="w-full px-3 py-1.5 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
+          >
+            <span className="flex items-center gap-2">
+              <Crosshair
+                className={`w-3.5 h-3.5 ${
+                  precisionMode ? 'text-emerald-600' : 'text-slate-400'
+                }`}
+              />
+              <span>Precision Mode (Touch)</span>
+            </span>
+            <span
+              className={`font-mono text-[11px] font-semibold ${
+                precisionMode ? 'text-emerald-600' : 'text-slate-500'
+              }`}
+            >
+              {precisionMode ? 'ON' : 'OFF'}
+            </span>
+          </button>
+
+          <div className="px-3 py-1 space-y-0.5 text-[10px] text-slate-500">
+            <div>Guide movement: Shift = 1 mm</div>
+            <div>Exact guide positions available in Properties</div>
+          </div>
+
+          {/* RULERS & GUIDELINES VISIBILITY / LOCK */}
+          <div className="my-1.5 border-t border-slate-100" />
+          <div className="px-3 py-1 text-[11px] font-semibold text-slate-400">
+            Rulers & Millimetre Guidelines
+          </div>
+          <button
+            type="button"
+            onClick={onToggleShowGuides}
+            className="w-full px-3 py-1.5 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
+          >
+            <span className="flex items-center gap-2">
+              {showGuides ? (
+                <Eye className="w-3.5 h-3.5 text-cyan-600" />
+              ) : (
+                <EyeOff className="w-3.5 h-3.5 text-slate-400" />
+              )}
+              <span>Show Guidelines</span>
+            </span>
+            <span className="font-mono text-[11px] text-slate-500">
+              {showGuides ? 'ON' : 'OFF'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleLockGuides}
+            className="w-full px-3 py-1.5 text-left flex items-center justify-between hover:bg-slate-100 text-slate-700"
+          >
+            <span className="flex items-center gap-2">
+              {lockGuides ? (
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+              ) : (
+                <Unlock className="w-3.5 h-3.5 text-slate-400" />
+              )}
+              <span>Lock Guidelines</span>
+            </span>
+            <span className="font-mono text-[11px] text-slate-500">
+              {lockGuides ? 'LOCKED' : 'OFF'}
+            </span>
+          </button>
+
           <div className="my-1 border-t border-slate-100" />
           <button
             type="button"
@@ -778,7 +940,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
               onClearGuides();
               closeAllMenus();
             }}
-            className="w-full px-3 py-2 text-left text-rose-600 hover:bg-rose-50"
+            className="w-full px-3 py-1.5 text-left text-rose-600 hover:bg-rose-50"
           >
             Clear Page Guidelines
           </button>

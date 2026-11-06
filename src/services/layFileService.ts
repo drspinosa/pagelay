@@ -41,6 +41,8 @@ interface LayManifestV1 {
   snapToGuides: boolean;
   snapToPageEdges: boolean;
   snapToObjects?: boolean;
+  angleSnapIncrementDeg?: number;
+  precisionMode?: boolean;
   pages: PageData[];
   assets: SerializedAssetMeta[];
 }
@@ -89,6 +91,8 @@ export async function serializeDocumentToLayBlob(doc: PageLayDocument): Promise<
     snapToGuides: doc.snapToGuides,
     snapToPageEdges: doc.snapToPageEdges,
     snapToObjects: doc.snapToObjects,
+    angleSnapIncrementDeg: doc.angleSnapIncrementDeg,
+    precisionMode: doc.precisionMode,
     pages: doc.pages,
     assets: serializedAssets,
   };
@@ -186,6 +190,12 @@ export async function loadDocumentFromLayFile(file: File | Blob): Promise<PageLa
     snapToGuides: manifest.snapToGuides ?? true,
     snapToPageEdges: manifest.snapToPageEdges ?? true,
     snapToObjects: manifest.snapToObjects ?? true,
+    angleSnapIncrementDeg:
+      typeof manifest.angleSnapIncrementDeg === 'number' &&
+      Number.isFinite(manifest.angleSnapIncrementDeg)
+        ? Math.max(1, Math.min(45, Math.round(manifest.angleSnapIncrementDeg)))
+        : 15,
+    precisionMode: manifest.precisionMode ?? false,
     pages: manifest.pages,
     assets: assetsRecord,
   };

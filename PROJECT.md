@@ -149,6 +149,30 @@
   - Updated `startObjectSelectionAndMove` and all object `onPointerDown`, `onMouseDown`, and `onContextMenu` handlers in `src/components/EditorCanvas.tsx` to detect `e.ctrlKey` (Windows/Linux `Ctrl`), `e.metaKey` (macOS `⌘ Command`), and `e.shiftKey`, toggling the clicked object in `selectedObjectIds` without triggering a duplicate toggle on the subsequent `mousedown` event or opening the native browser context menu on macOS `Ctrl + Click`.
   - Updated `startWorkspaceInteraction` so clicking empty workspace while holding `Ctrl` / `Cmd (⌘)` / `Shift` preserves the active multi-selection instead of clearing it.
 
+### Milestone 13 — Workspace `touch-action: none` vs Sidebar `touch-action: pan-y` Refinement
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"Review `src/index.css` to remove redundant style declarations, ensuring that all layout containers specifically use `touch-action: none` for the workspace canvas while keeping `touch-action: pan-y` for scrollable sidebars to prevent unwanted document panning on mobile devices."*
+- **Engineering Changes**:
+  - Consolidated `src/index.css` rules so `.workspace-canvas` enforces `touch-action: none` while `[data-sidebar="true"]` and `.touch-scroll-y` containers explicitly preserve `touch-action: pan-y`.
+
+### Milestone 14 — Precision Snapping, Configurable Angle Snapping, Exact Guideline Editing & Touch Precision Mode
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Precision Snapping, Rotation and Guideline Improvements"*
+- **Engineering Changes**:
+  - **Configurable Angle Snapping (`1°`–`45°`)**:
+    - Added `angleSnapIncrementDeg: number` (default `15`) and `precisionMode: boolean` (default `false`) to `PageLayDocument` (`src/model/documentTypes.ts`, `src/model/documentFactory.ts`) with backwards-compatible `.lay` manifest persistence (`src/services/layFileService.ts`).
+    - Replaced hardcoded `15°` rotation snapping in `src/components/EditorCanvas.tsx` with `doc.angleSnapIncrementDeg` (`1°`–`45°`), supporting quick presets (`1°, 5°, 10°, 15°, 30°, 45°`) and custom whole-number entry in the **Guides & Snap** menu (`src/components/TopToolbar.tsx`).
+    - Added live `Shift` key press/release listener during active drags so pressing or releasing `Shift` mid-drag immediately toggles snapping without restarting the interaction.
+  - **Shift-Constrained Line, Arrow & Dimension Drawing and Endpoint Adjustment**:
+    - Added `constrainLineEndpointByAngleMm` in `src/components/EditorCanvas.tsx` to project dragged endpoints onto multiples of `angleSnapIncrementDeg` measured from the horizontal axis while always including exact horizontal (`0°`, `180°`) and vertical (`90°`, `270°`) directions and giving angle constraints strict precedence over magnetic position snapping.
+  - **Precision Guideline Dragging (`Shift + Drag` = `1 mm`) & Exact Numeric Position Entry**:
+    - Updated `dragging-guide` in `src/components/EditorCanvas.tsx` to snap to whole `1 mm` increments when `Shift` or `Precision Mode` is active (`0.1 mm` free movement otherwise).
+    - Extended `src/components/PropertiesPanel.tsx` and `src/components/EditorCanvas.tsx` so clicking/tapping a guideline selects it and allows inline decimal editing (`Vertical guide — X: 123.4 mm` / `Horizontal guide — Y: 250.0 mm`) with `Enter` to confirm, `Escape` to cancel, page-boundary validation, and undo/redo history support.
+  - **Touch Precision Mode & Structured Guides & Snap Menu**:
+    - Reorganized the **Guides & Snap** dropdown in `src/components/TopToolbar.tsx` into three compact sections: **Magnetic Snapping**, **Angle Snapping**, and **Precision** (including the **Precision Mode (Touch)** toggle and toolbar active badge).
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference
@@ -156,6 +180,9 @@
 | Shortcut | Action |
 | :--- | :--- |
 | `Ctrl + Click` / `⌘ + Click` (or `Shift + Click`) | Add or toggle multiple objects in selection on the canvas |
+| `Shift + Rotate` | Constrain object/group rotation to configured angle increment (`1°`–`45°`, default `15°`) |
+| `Shift + Drag` (Line / Arrow / Dimension) | Constrain drawing or endpoint angle to configured angle increment + cardinal axes |
+| `Shift + Drag` (Guideline) | Constrain guideline movement to exact `1 mm` whole-millimetre increments |
 | `Ctrl / Cmd + Z` | Undo last action |
 | `Ctrl / Cmd + Y` or `Ctrl / Cmd + Shift + Z` | Redo action |
 | `Ctrl / Cmd + S` | Save document as `.lay` archive |
@@ -169,7 +196,7 @@
 | `Delete` / `Backspace` | Delete selected object |
 | `Arrow Keys` | Nudge selected object by `1 mm` (`10 mm` with `Shift`) |
 | `Spacebar + Drag` | Pan / slide canvas |
-| `Escape` | Exit text editing / crop mode and return to Select tool |
+| `Escape` | Exit text editing / crop mode / cancel inline guide edit and return to Select tool |
 
 ---
 
@@ -183,9 +210,11 @@
 | Viewport & Overflow Lock | `index.html`, `src/index.css`, `src/App.tsx` | Verified | `100dvh` lock, `overscroll-none`, isolated drawer positioning |
 | Ruler & Guideline Isolation | `src/components/Rulers.tsx`, `src/components/EditorCanvas.tsx` | Verified | Target & coordinate checks prevent accidental page pan |
 | Magnetic Snap to Objects | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx` | Verified | Snaps to edges & centres of other objects + TopToolbar toggle |
+| Configurable Angle & Guide Precision | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx`, `src/components/PropertiesPanel.tsx` | Verified | `1°–45°` angle snap, `Shift` line/endpoint snap, `1 mm` guide snap, exact decimal guide edit, Touch Precision Mode |
 | Page Alignment Controls | `src/components/PropertiesPanel.tsx` | Verified | Left, Center H, Right, Top, Center V, Bottom, Center Both |
 | Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx` | Verified | `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
 | Keyboard Shortcuts Suite | `src/App.tsx` | Verified | Undo/Redo, Save, Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
-| `.lay` Archive Save / Load | `src/services/layFileService.ts` | Verified | Lossless `Uint8Array` asset preservation |
+| `.lay` Archive Save / Load | `src/services/layFileService.ts` | Verified | Lossless `Uint8Array` asset preservation + backwards-compatible precision settings |
 | Vector PDF & High-DPI Export | `src/services/pdfExportService.ts`, `src/services/imageExportService.ts` | Verified | `pdf-lib` vector output + 72/150/300 DPI PNG/JPG |
+
 

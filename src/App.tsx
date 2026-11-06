@@ -74,6 +74,7 @@ export default function App() {
   const [activePageIndex, setActivePageIndex] = useState<number>(0);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
+  const [selectedGuideId, setSelectedGuideId] = useState<string | null>(null);
   const [croppingImageId, setCroppingImageId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
 
@@ -897,6 +898,8 @@ export default function App() {
         snapToGuides={doc.snapToGuides}
         snapToPageEdges={doc.snapToPageEdges}
         snapToObjects={doc.snapToObjects}
+        angleSnapIncrementDeg={doc.angleSnapIncrementDeg ?? 15}
+        precisionMode={Boolean(doc.precisionMode)}
         onToggleShowGuides={() =>
           setDoc((prev) => ({ ...prev, showGuides: !prev.showGuides }))
         }
@@ -912,8 +915,18 @@ export default function App() {
         onToggleSnapToObjects={() =>
           setDoc((prev) => ({ ...prev, snapToObjects: !prev.snapToObjects }))
         }
+        onChangeAngleSnapIncrement={(deg) => {
+          const clamped = Math.max(1, Math.min(45, Math.round(deg || 15)));
+          setDoc((prev) => ({ ...prev, angleSnapIncrementDeg: clamped }));
+          setIsDirty(true);
+        }}
+        onTogglePrecisionMode={() => {
+          setDoc((prev) => ({ ...prev, precisionMode: !prev.precisionMode }));
+          setIsDirty(true);
+        }}
         onClearGuides={() => {
           pushHistory(doc);
+          setSelectedGuideId(null);
           setDoc((prev) => ({
             ...prev,
             pages: prev.pages.map((p, idx) =>
@@ -1045,6 +1058,7 @@ export default function App() {
           activeHighlightColor={activeHighlightColor}
           selectedObjectId={selectedObjectId}
           selectedObjectIds={selectedObjectIds}
+          selectedGuideId={selectedGuideId}
           croppingImageId={croppingImageId}
           editingTextId={editingTextId}
           onSelectObject={(id, additive = false) => {
@@ -1055,6 +1069,7 @@ export default function App() {
               setEditingTextId(null);
               return;
             }
+            setSelectedGuideId(null);
             if (additive) {
               setSelectedObjectIds((prev) => {
                 const base =
@@ -1076,6 +1091,7 @@ export default function App() {
             if (id !== croppingImageId) setCroppingImageId(null);
             if (id !== editingTextId) setEditingTextId(null);
           }}
+          onSelectGuide={(guideId) => setSelectedGuideId(guideId)}
           onSetCroppingImageId={setCroppingImageId}
           onSetEditingTextId={setEditingTextId}
           onSelectTool={setActiveTool}
@@ -1140,6 +1156,8 @@ export default function App() {
               activePageIndex={activePageIndex}
               selectedObject={selectedObject}
               selectedObjectIds={selectedObjectIds}
+              selectedGuideId={selectedGuideId}
+              onSelectGuide={(guideId) => setSelectedGuideId(guideId)}
               onSelectObjectIds={(ids) => {
                 setSelectedObjectIds(ids);
                 setSelectedObjectId(ids[ids.length - 1] ?? null);
@@ -1182,7 +1200,7 @@ export default function App() {
                 const g: Guideline = {
                   id: generateId('guide'),
                   orientation,
-                  positionMm: formatMm(positionMm, 1),
+                  positionMm: formatMm(positionMm, 2),
                 };
                 setDoc((prev) => ({
                   ...prev,
@@ -1193,9 +1211,29 @@ export default function App() {
                       : p
                   ),
                 }));
+                setSelectedGuideId(g.id);
+              }}
+              onUpdateGuideline={(guideId, nextPositionMm) => {
+                pushHistory(doc);
+                const clamped = formatMm(nextPositionMm, 2);
+                setDoc((prev) => ({
+                  ...prev,
+                  pages: prev.pages.map((p, idx) =>
+                    idx === activePageIndex
+                      ? {
+                          ...p,
+                          guidelines: p.guidelines.map((g) =>
+                            g.id === guideId ? { ...g, positionMm: clamped } : g
+                          ),
+                        }
+                      : p
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }));
               }}
               onRemoveGuideline={(guideId) => {
                 pushHistory(doc);
+                if (selectedGuideId === guideId) setSelectedGuideId(null);
                 setDoc((prev) => ({
                   ...prev,
                   pages: prev.pages.map((p, idx) =>

@@ -198,6 +198,10 @@ export interface PageLayDocument {
   snapToGuides: boolean;
   snapToPageEdges: boolean;
   snapToObjects: boolean;
+  /** Configurable angle snapping increment in degrees (1–45, default 15) */
+  angleSnapIncrementDeg: number;
+  /** Touch/mobile precision mode: applies angle snapping & 1 mm guide snapping without holding Shift */
+  precisionMode: boolean;
   pages: PageData[];
   assets: Record<string, ImageAsset>;
 }

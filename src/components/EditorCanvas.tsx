@@ -71,9 +71,11 @@ interface EditorCanvasProps {
   activeHighlightColor: string;
   selectedObjectId: string | null;
   selectedObjectIds: string[];
+  selectedGuideId: string | null;
   croppingImageId: string | null;
   editingTextId: string | null;
   onSelectObject: (id: string | null, additive?: boolean) => void;
+  onSelectGuide: (guideId: string | null) => void;
   onSetCroppingImageId: (id: string | null) => void;
   onSetEditingTextId: (id: string | null) => void;
   onSelectTool: (tool: ToolType) => void;
@@ -185,9 +187,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   activeHighlightColor,
   selectedObjectId,
   selectedObjectIds,
+  selectedGuideId,
   croppingImageId,
   editingTextId,
   onSelectObject,
+  onSelectGuide,
   onSetCroppingImageId,
   onSetEditingTextId,
   onSelectTool,
@@ -215,6 +219,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   const isTouchPinchingRef = useRef<boolean>(false);
   const isAdjustingGuideOrRulerRef = useRef<boolean>(false);
   const lastObjectPointerDownTimeRef = useRef<number>(0);
+  const isShiftPressedRef = useRef<boolean>(false);
+  const lastPointerClientRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const processPointerMoveRef = useRef<
+    (clientX: number, clientY: number, shiftKey?: boolean) => void
+  >(() => {});
 
   // Synchronized refs so native touch event listeners always read fresh zoom & pan values
   const zoomRef = useRef(zoom);
@@ -257,6 +266,16 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Shift' && !isShiftPressedRef.current) {
+        isShiftPressedRef.current = true;
+        if (interactionRef.current && lastPointerClientRef.current) {
+          processPointerMoveRef.current(
+            lastPointerClientRef.current.clientX,
+            lastPointerClientRef.current.clientY,
+            true
+          );
+        }
+      }
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (e.code === 'Space' && !isSpacePressed) {
@@ -265,6 +284,16 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift' && isShiftPressedRef.current) {
+        isShiftPressedRef.current = false;
+        if (interactionRef.current && lastPointerClientRef.current) {
+          processPointerMoveRef.current(
+            lastPointerClientRef.current.clientX,
+            lastPointerClientRef.current.clientY,
+            false
+          );
+        }
+      }
       if (e.code === 'Space') {
         setIsSpacePressed(false);
       }
@@ -882,9 +911,67 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   };
 
   /**
+   * Constrains a line/arrow/dimension endpoint to multiples of the configured angle increment
+   * measured from the horizontal axis, while always including exact horizontal (0°, 180°) and
+   * vertical (90°, 270°) snap targets and preserving the dragged line length from the fixed anchor.
+   */
+  const constrainLineEndpointByAngleMm = (
+    anchorXMm: number,
+    anchorYMm: number,
+    rawTargetXMm: number,
+    rawTargetYMm: number,
+    angleStepDeg: number
+  ): { xMm: number; yMm: number; angleDeg: number } => {
+    const dx = rawTargetXMm - anchorXMm;
+    const dy = rawTargetYMm - anchorYMm;
+    const lengthMm = Math.hypot(dx, dy);
+    if (lengthMm < 0.001) {
+      return {
+        xMm: formatMm(anchorXMm, 2),
+        yMm: formatMm(anchorYMm, 2),
+        angleDeg: 0,
+      };
+    }
+
+    const step = Math.max(1, Math.min(45, Math.round(angleStepDeg || 15)));
+    const rawAngleDeg = ((((Math.atan2(dy, dx) * 180) / Math.PI) % 360) + 360) % 360;
+
+    // Candidate snap angles in [0, 360): multiples of step + exact horizontal/vertical axes
+    const candidateAngles = new Set<number>([0, 90, 180, 270]);
+    for (let a = 0; a < 360; a += step) {
+      candidateAngles.add(a);
+    }
+
+    let bestAngleDeg = 0;
+    let minAngularDiff = Infinity;
+    candidateAngles.forEach((candidate) => {
+      const diff = Math.abs(((rawAngleDeg - candidate + 540) % 360) - 180);
+      if (diff < minAngularDiff) {
+        minAngularDiff = diff;
+        bestAngleDeg = candidate;
+      }
+    });
+
+    const rad = (bestAngleDeg * Math.PI) / 180;
+    return {
+      xMm: formatMm(anchorXMm + lengthMm * Math.cos(rad), 2),
+      yMm: formatMm(anchorYMm + lengthMm * Math.sin(rad), 2),
+      angleDeg: bestAngleDeg,
+    };
+  };
+
+  /**
    * Unified coordinate move processor for both MouseMove and 1-finger TouchMove.
    */
   const processPointerMove = (clientX: number, clientY: number, shiftKey = false) => {
+    lastPointerClientRef.current = { clientX, clientY };
+    isShiftPressedRef.current = shiftKey;
+    const isPrecisionActive = Boolean(shiftKey || doc.precisionMode);
+    const angleStepDeg = Math.max(
+      1,
+      Math.min(45, Math.round(doc.angleSnapIncrementDeg || 15))
+    );
+
     const ptMm = clientToPageMm(clientX, clientY);
     onCursorMoveMm({ x: formatMm(ptMm.x, 1), y: formatMm(ptMm.y, 1) });
 
@@ -908,25 +995,26 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     }
 
     if (currentInteraction.mode === 'dragging-guide') {
-      const rawPos = formatMm(
-        currentInteraction.orientation === 'vertical' ? ptMm.x : ptMm.y,
-        1
-      );
+      const rawCoord =
+        currentInteraction.orientation === 'vertical' ? ptMm.x : ptMm.y;
+      const nextPosMm = isPrecisionActive
+        ? Math.round(rawCoord)
+        : formatMm(rawCoord, 1);
       setInteraction({
         ...currentInteraction,
-        positionMm: rawPos,
+        positionMm: nextPosMm,
       });
       const exists = page.guidelines.some((g) => g.id === currentInteraction.guideId);
       const updated = exists
         ? page.guidelines.map((g) =>
-            g.id === currentInteraction.guideId ? { ...g, positionMm: rawPos } : g
+            g.id === currentInteraction.guideId ? { ...g, positionMm: nextPosMm } : g
           )
         : [
             ...page.guidelines,
             {
               id: currentInteraction.guideId,
               orientation: currentInteraction.orientation,
-              positionMm: rawPos,
+              positionMm: nextPosMm,
             },
           ];
       onUpdateGuidelines(updated, false);
@@ -1039,6 +1127,34 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       const init = interaction.initialObject;
       if (init.locked) return;
 
+      if (isPrecisionActive) {
+        // Angle constraint takes strict precedence over magnetic position snapping
+        setActiveSnapLines({ verticalMm: null, horizontalMm: null });
+        const anchorX = interaction.endpoint === 'p1' ? init.x2Mm : init.x1Mm;
+        const anchorY = interaction.endpoint === 'p1' ? init.y2Mm : init.y1Mm;
+        const constrained = constrainLineEndpointByAngleMm(
+          anchorX,
+          anchorY,
+          ptMm.x,
+          ptMm.y,
+          angleStepDeg
+        );
+        const updated =
+          interaction.endpoint === 'p1'
+            ? syncLinearBoundingBox({
+                ...init,
+                x1Mm: constrained.xMm,
+                y1Mm: constrained.yMm,
+              })
+            : syncLinearBoundingBox({
+                ...init,
+                x2Mm: constrained.xMm,
+                y2Mm: constrained.yMm,
+              });
+        onUpdateObject(updated, false);
+        return;
+      }
+
       const snapX = snapCoordinateMm(ptMm.x, 'x', [init.id]);
       const snapY = snapCoordinateMm(ptMm.y, 'y', [init.id]);
       setActiveSnapLines({
@@ -1071,10 +1187,10 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       );
       let deg = (angleRad * 180) / Math.PI + 90;
       deg = ((deg % 360) + 360) % 360;
-      if (shiftKey) {
-        deg = Math.round(deg / 15) * 15;
+      if (isPrecisionActive) {
+        deg = (Math.round(deg / angleStepDeg) * angleStepDeg) % 360;
       } else {
-        deg = Math.round(deg);
+        deg = Math.round(deg) % 360;
       }
       if (init.type === 'group') {
         onUpdateObject(rotateGroupObjectMm(init, deg), false);
@@ -1232,15 +1348,43 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     }
 
     if (interaction.mode === 'creating-object') {
-      const snapX = snapCoordinateMm(ptMm.x, 'x').snappedMm;
-      const snapY = snapCoordinateMm(ptMm.y, 'y').snappedMm;
+      const isLinearTool =
+        interaction.tool === 'line' ||
+        interaction.tool === 'arrow' ||
+        interaction.tool === 'dimension';
+
+      if (isLinearTool && isPrecisionActive) {
+        // Angle constraint takes strict precedence over magnetic position snapping
+        setActiveSnapLines({ verticalMm: null, horizontalMm: null });
+        const constrained = constrainLineEndpointByAngleMm(
+          interaction.startMmX,
+          interaction.startMmY,
+          ptMm.x,
+          ptMm.y,
+          angleStepDeg
+        );
+        setInteraction({
+          ...interaction,
+          currentMmX: constrained.xMm,
+          currentMmY: constrained.yMm,
+        });
+        return;
+      }
+
+      const snapX = snapCoordinateMm(ptMm.x, 'x');
+      const snapY = snapCoordinateMm(ptMm.y, 'y');
+      setActiveSnapLines({
+        verticalMm: snapX.snapLineMm,
+        horizontalMm: snapY.snapLineMm,
+      });
       setInteraction({
         ...interaction,
-        currentMmX: snapX,
-        currentMmY: snapY,
+        currentMmX: snapX.snappedMm,
+        currentMmY: snapY.snappedMm,
       });
     }
   };
+  processPointerMoveRef.current = processPointerMove;
 
   /**
    * Calculates the new zoom scale and focal-point pan offset from two active touch/pointer points.
@@ -1372,7 +1516,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
 
     if (e.touches.length === 1 && !isTouchPinchingRef.current) {
       const t = e.touches[0];
-      processPointerMove(t.clientX, t.clientY, false);
+      processPointerMove(t.clientX, t.clientY, isShiftPressedRef.current);
     }
   };
 
@@ -1419,6 +1563,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     if (currentInteraction.mode === 'panning') {
       if (currentInteraction.clearSelectionOnTap && currentInteraction.movedDistancePx <= 4) {
         onSelectObject(null);
+        onSelectGuide(null);
       }
       setInteraction(null);
       return;
@@ -2832,6 +2977,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   {isVert ? 'Vertical Guide X:' : 'Horizontal Guide Y:'}
                 </span>
                 <span>{formatMm(interaction.positionMm, 1)} mm</span>
+                {(isShiftPressedRef.current || doc.precisionMode) && (
+                  <span className="text-[10px] font-sans text-teal-300">
+                    (1 mm snap)
+                  </span>
+                )}
                 {!inBounds && (
                   <span className="text-[10px] font-sans text-rose-300">
                     (Outside page — release to remove)
@@ -3000,17 +3150,25 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
               const posPx = g.positionMm * basePxPerMm;
               const isDraggingThis =
                 interaction?.mode === 'dragging-guide' && interaction.guideId === g.id;
+              const isSelectedGuide = selectedGuideId === g.id;
               // Generous 24px screen-equivalent hit area so fingers can easily grab guidelines on mobile
               const hitThickness = Math.max(14, 24 * invZoom);
-              const lineThickness = Math.max(1, 1.4 * invZoom);
+              const lineThickness = Math.max(
+                1,
+                (isSelectedGuide || isDraggingThis ? 2.2 : 1.4) * invZoom
+              );
 
               return isVertical ? (
                 <div
                   key={g.id}
                   data-guide-handle="true"
                   onPointerDown={(e) => {
-                    if (doc.lockGuides || (e.pointerType === 'mouse' && e.button !== 0)) return;
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
                     e.stopPropagation();
+                    onSelectGuide(g.id);
+                    onSelectObject(null);
+                    if (doc.lockGuides) return;
+                    isShiftPressedRef.current = e.shiftKey;
                     isAdjustingGuideOrRulerRef.current = true;
                     activePointersRef.current.set(e.pointerId, {
                       clientX: e.clientX,
@@ -3030,8 +3188,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   onMouseDown={(e) => {
-                    if (doc.lockGuides || e.button !== 0) return;
+                    if (e.button !== 0) return;
                     e.stopPropagation();
+                    onSelectGuide(g.id);
+                    onSelectObject(null);
+                    if (doc.lockGuides) return;
+                    isShiftPressedRef.current = e.shiftKey;
                     isAdjustingGuideOrRulerRef.current = true;
                     if (interactionRef.current !== null) return;
                     setInteraction({
@@ -3043,8 +3205,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   onTouchStart={(e) => {
-                    if (doc.lockGuides || e.touches.length !== 1) return;
+                    if (e.touches.length !== 1) return;
                     e.stopPropagation();
+                    onSelectGuide(g.id);
+                    onSelectObject(null);
+                    if (doc.lockGuides) return;
                     isAdjustingGuideOrRulerRef.current = true;
                     if (interactionRef.current !== null) return;
                     setInteraction({
@@ -3056,28 +3221,34 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   className={`absolute top-0 bottom-0 z-30 group flex justify-center touch-none ${
-                    doc.lockGuides ? 'pointer-events-none' : 'cursor-ew-resize'
+                    doc.lockGuides ? 'cursor-pointer' : 'cursor-ew-resize'
                   }`}
                   style={{
                     left: posPx - hitThickness / 2,
                     width: hitThickness,
                   }}
-                  title={`Vertical guideline at ${formatMm(g.positionMm)} mm`}
+                  title={`Vertical guideline — X: ${formatMm(g.positionMm, 1)} mm`}
                 >
                   <div
-                    className="h-full bg-cyan-500/85 group-hover:bg-cyan-600"
+                    className={`h-full ${
+                      isSelectedGuide
+                        ? 'bg-cyan-600'
+                        : 'bg-cyan-500/85 group-hover:bg-cyan-600'
+                    }`}
                     style={{ width: lineThickness }}
                   />
                   <span
                     className={`absolute top-2 left-3 px-1.5 py-0.5 rounded bg-cyan-600 text-white font-mono text-[10px] shadow-sm pointer-events-none whitespace-nowrap ${
-                      isDraggingThis ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                      isDraggingThis || isSelectedGuide
+                        ? 'opacity-100'
+                        : 'opacity-0 group-hover:opacity-100'
                     }`}
                     style={{
                       transform: `scale(${invZoom})`,
                       transformOrigin: 'top left',
                     }}
                   >
-                    X: {formatMm(g.positionMm)} mm
+                    X: {formatMm(g.positionMm, 1)} mm
                   </span>
                 </div>
               ) : (
@@ -3085,8 +3256,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   key={g.id}
                   data-guide-handle="true"
                   onPointerDown={(e) => {
-                    if (doc.lockGuides || (e.pointerType === 'mouse' && e.button !== 0)) return;
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
                     e.stopPropagation();
+                    onSelectGuide(g.id);
+                    onSelectObject(null);
+                    if (doc.lockGuides) return;
+                    isShiftPressedRef.current = e.shiftKey;
                     isAdjustingGuideOrRulerRef.current = true;
                     activePointersRef.current.set(e.pointerId, {
                       clientX: e.clientX,
@@ -3106,8 +3281,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   onMouseDown={(e) => {
-                    if (doc.lockGuides || e.button !== 0) return;
+                    if (e.button !== 0) return;
                     e.stopPropagation();
+                    onSelectGuide(g.id);
+                    onSelectObject(null);
+                    if (doc.lockGuides) return;
+                    isShiftPressedRef.current = e.shiftKey;
                     isAdjustingGuideOrRulerRef.current = true;
                     if (interactionRef.current !== null) return;
                     setInteraction({
@@ -3119,8 +3298,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   onTouchStart={(e) => {
-                    if (doc.lockGuides || e.touches.length !== 1) return;
+                    if (e.touches.length !== 1) return;
                     e.stopPropagation();
+                    onSelectGuide(g.id);
+                    onSelectObject(null);
+                    if (doc.lockGuides) return;
                     isAdjustingGuideOrRulerRef.current = true;
                     if (interactionRef.current !== null) return;
                     setInteraction({
@@ -3132,28 +3314,34 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   className={`absolute left-0 right-0 z-30 group flex items-center touch-none ${
-                    doc.lockGuides ? 'pointer-events-none' : 'cursor-ns-resize'
+                    doc.lockGuides ? 'cursor-pointer' : 'cursor-ns-resize'
                   }`}
                   style={{
                     top: posPx - hitThickness / 2,
                     height: hitThickness,
                   }}
-                  title={`Horizontal guideline at ${formatMm(g.positionMm)} mm`}
+                  title={`Horizontal guideline — Y: ${formatMm(g.positionMm, 1)} mm`}
                 >
                   <div
-                    className="w-full bg-cyan-500/85 group-hover:bg-cyan-600"
+                    className={`w-full ${
+                      isSelectedGuide
+                        ? 'bg-cyan-600'
+                        : 'bg-cyan-500/85 group-hover:bg-cyan-600'
+                    }`}
                     style={{ height: lineThickness }}
                   />
                   <span
                     className={`absolute left-2 top-3 px-1.5 py-0.5 rounded bg-cyan-600 text-white font-mono text-[10px] shadow-sm pointer-events-none whitespace-nowrap ${
-                      isDraggingThis ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                      isDraggingThis || isSelectedGuide
+                        ? 'opacity-100'
+                        : 'opacity-0 group-hover:opacity-100'
                     }`}
                     style={{
                       transform: `scale(${invZoom})`,
                       transformOrigin: 'top left',
                     }}
                   >
-                    Y: {formatMm(g.positionMm)} mm
+                    Y: {formatMm(g.positionMm, 1)} mm
                   </span>
                 </div>
               );
