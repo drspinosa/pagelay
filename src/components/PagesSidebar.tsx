@@ -13,8 +13,8 @@
  * Clearly indicates the active page and renders a miniature proportional preview.
  */
 
-import React from 'react';
-import { Plus, Copy, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { Plus, Copy, Trash2, ArrowUp, ArrowDown, FolderInput } from 'lucide-react';
 import { ImageAsset, PageData } from '../model/documentTypes';
 import { buildSmoothFreehandSvgPath, flattenPageObjects } from '../utils/units';
 
@@ -29,6 +29,7 @@ interface PagesSidebarProps {
   onDuplicatePage: (index: number) => void;
   onDeletePage: (index: number) => void;
   onMovePage: (index: number, direction: 'up' | 'down') => void;
+  onDropFilesOnPagesSidebar: (files: File[]) => void;
 }
 
 export const PagesSidebar: React.FC<PagesSidebarProps> = ({
@@ -42,7 +43,12 @@ export const PagesSidebar: React.FC<PagesSidebarProps> = ({
   onDuplicatePage,
   onDeletePage,
   onMovePage,
+  onDropFilesOnPagesSidebar,
 }) => {
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragDepthRef = useRef(0);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
   const aspectRatio = widthMm / Math.max(1, heightMm);
   const thumbMaxWidth = 148;
   const thumbMaxHeight = 112;
@@ -57,22 +63,99 @@ export const PagesSidebar: React.FC<PagesSidebarProps> = ({
   return (
     <aside
       data-sidebar="true"
-      className="w-52 h-full bg-white border-r border-slate-200 flex flex-col overflow-hidden touch-pan-y select-none shrink-0 z-20"
+      onDragEnter={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragDepthRef.current += 1;
+        setIsDragOver(true);
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.dataTransfer) {
+          e.dataTransfer.dropEffect = 'copy';
+        }
+        if (!isDragOver) {
+          setIsDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        const related = e.relatedTarget as Node | null;
+        if (dragDepthRef.current === 0 || (related && !e.currentTarget.contains(related))) {
+          dragDepthRef.current = 0;
+          setIsDragOver(false);
+        }
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragDepthRef.current = 0;
+        setIsDragOver(false);
+        const droppedFiles = Array.from(e.dataTransfer?.files ?? []);
+        if (droppedFiles.length > 0) {
+          onDropFilesOnPagesSidebar(droppedFiles);
+        }
+      }}
+      className="relative w-52 h-full bg-white border-r border-slate-200 flex flex-col overflow-hidden touch-pan-y select-none shrink-0 z-20"
     >
+      {/* Hidden File Picker for Import Pages */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".lay,application/zip,application/octet-stream"
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          if (files.length > 0) {
+            onDropFilesOnPagesSidebar(files);
+          }
+          e.target.value = '';
+        }}
+      />
+
+      {/* Visual Drop Overlay for Importing Pages */}
+      {isDragOver && (
+        <div className="absolute inset-2 z-50 bg-blue-600/12 border-2 border-dashed border-blue-600 rounded-xl flex items-center justify-center p-3 pointer-events-none">
+          <div className="bg-white/95 backdrop-blur-xs px-3 py-2.5 rounded-lg shadow-md border border-blue-200 flex flex-col items-center text-center gap-1">
+            <FolderInput className="w-4 h-4 text-blue-600 shrink-0" />
+            <span className="text-xs font-bold text-blue-950">
+              Drop to Import Pages
+            </span>
+            <span className="text-[10px] text-slate-600 leading-tight">
+              Appends pages from .lay file to current document
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar Header */}
-      <div className="h-9 px-3 max-lg:pr-9 border-b border-slate-200 flex items-center justify-between shrink-0">
-        <span className="text-xs font-semibold text-slate-700">
+      <div className="h-9 px-2.5 max-lg:pr-8 border-b border-slate-200 flex items-center justify-between gap-1 shrink-0">
+        <span className="text-xs font-semibold text-slate-700 truncate">
           Pages ({pages.length})
         </span>
-        <button
-          type="button"
-          onClick={onAddPage}
-          className="px-2 py-1 text-[11px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded flex items-center gap-1 transition-colors"
-          title="Add New Page"
-        >
-          <Plus className="w-3 h-3" />
-          <span>Add Page</span>
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => importInputRef.current?.click()}
+            className="px-1.5 py-1 text-[10px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded flex items-center gap-1 transition-colors"
+            title="Import Pages from another .lay Document"
+          >
+            <FolderInput className="w-3 h-3 text-slate-600" />
+            <span>Import</span>
+          </button>
+          <button
+            type="button"
+            onClick={onAddPage}
+            className="px-1.5 py-1 text-[10px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded flex items-center gap-0.5 transition-colors"
+            title="Add New Blank Page"
+          >
+            <Plus className="w-3 h-3" />
+            <span>Add</span>
+          </button>
+        </div>
       </div>
 
       {/* Scrollable Page Thumbnail List */}

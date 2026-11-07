@@ -20,6 +20,7 @@ import {
   PaperFormat,
   Orientation,
 } from '../model/documentTypes';
+import { collectReferencedAssetIds } from '../model/documentFactory';
 import { syncFreehandBoundingBox } from '../utils/units';
 
 interface SerializedAssetMeta {
@@ -105,16 +106,19 @@ const LAY_FILE_PICKER_TYPES = [
 
 /**
  * Packages the authoritative PageLayDocument and all original untouched image bytes
- * into a downloadable `.lay` binary Blob.
+ * referenced by the document's pages into a downloadable `.lay` binary Blob.
  */
 export async function serializeDocumentToLayBlob(
   doc: PageLayDocument
 ): Promise<Blob> {
   const zip = new JSZip();
   const serializedAssets: SerializedAssetMeta[] = [];
+  const referencedAssetIds = collectReferencedAssetIds(doc.pages);
 
-  // Only include assets that are present in the document's asset table
+  // Only include assets that are actively referenced by at least one page (including inside groups),
+  // avoiding unnecessary orphan assets in saved .lay files while keeping in-memory doc.assets intact for Redo.
   for (const asset of Object.values(doc.assets)) {
+    if (!referencedAssetIds.has(asset.id)) continue;
     const safeFilename = asset.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
     const zipPath = `assets/${asset.id}_${safeFilename}`;
 

@@ -102,7 +102,7 @@ interface EditorCanvasProps {
   onGroupSelected: () => void;
   onUngroupSelected: (groupId: string) => void;
   onUpdateGuidelines: (guidelines: Guideline[], commitHistory: boolean) => void;
-  onDropFiles: (files: FileList, dropMm?: { x: number; y: number }) => void;
+  onDropFiles: (files: File[] | FileList, dropMm?: { x: number; y: number }) => void;
   onLoadSampleDocument: () => void;
   onTriggerImageUpload: () => void;
   workspaceRef: React.RefObject<HTMLDivElement | null>;
@@ -3678,17 +3678,37 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       onTouchEnd={handleWorkspaceTouchEnd}
       onTouchCancel={handleWorkspaceTouchCancel}
       onWheel={handleWheel}
-      onDragOver={(e) => {
+      onDragEnter={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         setIsDragOver(true);
       }}
-      onDragLeave={() => setIsDragOver(false)}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.dataTransfer) {
+          e.dataTransfer.dropEffect = 'copy';
+        }
+        if (!isDragOver) {
+          setIsDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const related = e.relatedTarget as Node | null;
+        if (!related || !e.currentTarget.contains(related)) {
+          setIsDragOver(false);
+        }
+      }}
       onDrop={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         setIsDragOver(false);
-        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        const droppedFiles = Array.from(e.dataTransfer?.files ?? []);
+        if (droppedFiles.length > 0) {
           const dropMm = clientToPageMm(e.clientX, e.clientY);
-          onDropFiles(e.dataTransfer.files, dropMm);
+          onDropFiles(droppedFiles, dropMm);
         }
       }}
       data-workspace-canvas="true"
@@ -3719,7 +3739,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
         <div className="absolute inset-4 z-50 bg-blue-600/15 border-2 border-dashed border-blue-600 rounded-xl flex items-center justify-center pointer-events-none">
           <div className="bg-white px-4 py-3 rounded-xl shadow-lg flex items-center gap-3 text-xs sm:text-sm font-semibold text-blue-950">
             <Upload className="w-5 h-5 text-blue-600 shrink-0" />
-            <span>Drop JPEG, PNG, WebP images or a .lay document here</span>
+            <span>Drop .lay document to Open, or drop JPEG, PNG, WebP images to place on page</span>
           </div>
         </div>
       )}

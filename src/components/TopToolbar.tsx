@@ -73,6 +73,7 @@ interface TopToolbarProps {
   onUndo: () => void;
   onRedo: () => void;
   onNewDocument: () => void;
+  onRequestOpenDocument?: () => void;
   onOpenLayFile: (file: File) => void;
   onTriggerOpenNativePicker?: () => Promise<boolean>;
   onSaveLayFile: () => void;
@@ -156,6 +157,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   onUndo,
   onRedo,
   onNewDocument,
+  onRequestOpenDocument,
   onOpenLayFile,
   onTriggerOpenNativePicker,
   onSaveLayFile,
@@ -424,6 +426,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             type="button"
             onClick={async () => {
               closeAllMenus();
+              if (onRequestOpenDocument) {
+                onRequestOpenDocument();
+                return;
+              }
               if (onTriggerOpenNativePicker) {
                 const useFallbackInput = await onTriggerOpenNativePicker();
                 if (useFallbackInput) {
@@ -1096,6 +1102,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
               type="button"
               onClick={async () => {
                 closeAllMenus();
+                if (onRequestOpenDocument) {
+                  onRequestOpenDocument();
+                  return;
+                }
                 if (onTriggerOpenNativePicker) {
                   const useFallbackInput = await onTriggerOpenNativePicker();
                   if (useFallbackInput) {

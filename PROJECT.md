@@ -278,6 +278,52 @@
   - Replaced hardcoded dropdown offsets in `src/components/TopToolbar.tsx` with trigger-ref `getBoundingClientRect()` measurement (`computeMenuCoords`), viewport boundary clamping, `resize`/`scroll` listeners (including horizontal toolbar strip scroll), and `createPortal(..., document.body)`.
   - Added `computeBoxCreationGeometryMm` and an SVG WYSIWYG live creation preview in `src/components/EditorCanvas.tsx` so dragging `Rectangle`, `Square` (`1:1`), `Ellipse`, `Circle` (`1:1`), `Triangle`, or `Area Highlight` previews the exact shape geometry, aspect ratio, fill, stroke, and opacity in all drag directions.
 
+### Milestone 21 — Critical Fix: Warn Before Discarding Unsaved Changes
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Critical Fix: Warn Before Discarding Unsaved Changes"*
+- **Engineering Changes**:
+  - **Centralised Unsaved Changes Protection (`requestDocumentReplacement` in `src/App.tsx`)**:
+    - Guards all actions that can replace the active document whenever `isDirty === true`:
+      1. **New Document** (desktop toolbar button and mobile `File` menu)
+      2. **Open `.lay` Document** (desktop toolbar button, mobile `File` menu, native `showOpenFilePicker`, or fallback `<input type="file">`)
+      3. **Load Sample A0** (desktop toolbar button, mobile `File` menu, empty-page floating bar, or inside `NewDocumentModal`)
+      4. **Drag-and-Drop of a `.lay` file** onto `EditorCanvas` (`handleFilesImported` when a `.lay` file is dropped; dropping images continues to import directly into the current document)
+    - When `isDirty === false`, performs the requested action immediately without unnecessary confirmation.
+  - **Unsaved Changes Confirmation Modal (`UnsavedChangesModal` in `src/components/Modals.tsx`)**:
+    - Displays **"Save changes before continuing?"** with *"You have unsaved changes to [document name]. Continuing without saving will discard those changes."*
+    - **Save**: Executes the existing Save workflow (`handleSaveDocument`) and continues the originally requested action only after saving succeeds (`saved-native` or user-confirmed fallback download in `SaveAsModal`). If Save is cancelled or fails, preserves the current document and aborts the pending replacement.
+    - **Don't Save**: Explicitly discards unsaved changes and continues the requested New, Open, Sample, or Dropped `.lay` action.
+    - **Cancel**: Closes the confirmation modal and keeps the existing document, selections, Undo/Redo history, `isDirty` status, and `activeFileHandle` association untouched.
+  - **Browser & Download Fallback Nuance (`SaveAsModal` in `src/components/Modals.tsx`)**:
+    - In environments where `FileSystemFileHandle` direct overwrite is unavailable, explains that **Save** downloads a `.lay` copy rather than overwriting an existing file on disk, and requires explicit user confirmation (**"Confirm Saved & Continue"** vs **"Keep Current Document"**) after download initiation before replacing the current document.
+  - **Browser Tab Close / Refresh Protection (`beforeunload` in `src/App.tsx`)**:
+    - Attaches a standard `window` `beforeunload` listener exclusively when `isDirty === true` so the browser warns before closing or refreshing the tab with unsaved changes.
+
+### Milestone 22 — Fix Unsafe `.lay` Drag-and-Drop and Add Import Pages via Pages Sidebar
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Fix Unsafe .lay Drag-and-Drop and Add Import Pages"*
+- **Confirmed Root Causes of the Drag-and-Drop Bypass**:
+  1. **Shared `layInputAuthorisedRef` Bypass on `action.type === 'open-file'` (`src/App.tsx`)**:
+     - When `executeReplacementAction({ type: 'open-picker' })` fell back to `<input type="file">`, it set `layInputAuthorisedRef.current = true`. Because cancelling a native `<input type="file">` dialog in browsers does not fire `onChange`, `layInputAuthorisedRef.current` remained `true`. Since canvas drag-and-drop (`handleFilesImported`) also dispatched `{ type: 'open-file', file }`, `alreadyAuthorisedFromOpenPicker` evaluated to `true` and bypassed the `isDirty` guard.
+  2. **Asynchronous React `isDirty` Closure vs Synchronous `isDirtyRef` & Transient `FileList` (`src/App.tsx`, `src/components/EditorCanvas.tsx`)**:
+     - `requestDocumentReplacement` relied only on the React state `isDirty` closure rather than a synchronous `isDirtyRef`, several toolbar setting mutations (`showGuides`, `lockGuides`, `snapToGuides`, `snapToPageEdges`, `snapToObjects`) did not call `markDirty()`, and `EditorCanvas.tsx` passed the transient `e.dataTransfer.files` `FileList` instead of synchronously copying `Array.from(e.dataTransfer.files)` during the `drop` event.
+- **Engineering Changes**:
+  - **Phase 1 — Safe Canvas `.lay` Drag-and-Drop (`src/App.tsx`, `src/components/EditorCanvas.tsx`)**:
+    - Removed `layInputAuthorisedRef` completely and ensured `{ type: 'open-file', file }` never has an authorisation bypass flag.
+    - Added synchronous `isDirtyRef` and `markDirty()` / `markClean()` helpers in `src/App.tsx` so `requestDocumentReplacement` always checks `isDirtyRef.current || isDirty`.
+    - Updated `EditorCanvas.tsx` `onDrop` to call `e.preventDefault(); e.stopPropagation();` and synchronously copy `Array.from(e.dataTransfer.files)` into a retained `File[]` array so the dropped `File` object remains valid while `UnsavedChangesModal` is displayed.
+  - **Phase 2 & 5 — Independent Drop Target & Import Button in `PagesSidebar` (`src/components/PagesSidebar.tsx`)**:
+    - Added isolated `onDragEnter`, `onDragOver`, `onDragLeave`, and `onDrop` handlers (`e.preventDefault(); e.stopPropagation()`) to `PagesSidebar.tsx` with a **"Drop to Import Pages"** visual overlay and a compact **Import** button + hidden `.lay` file input for mobile/tablet/desktop convenience.
+    - Dropping onto the **main canvas** triggers **Open Document** (subject to the unsaved-changes guard), whereas dropping onto the **Pages sidebar** triggers **Import Pages** (appending pages to the current document without replacing it or altering its name/file handle).
+  - **Phase 3 & 4 — Paper-Size Validation, Lossless Asset Merging, Collision Resolution & Single-Step Undo/Redo (`src/model/documentFactory.ts`, `src/services/layFileService.ts`, `src/App.tsx`)**:
+    - Added `collectReferencedAssetIds` and `prepareImportedPagesFromDocument` in `src/model/documentFactory.ts`:
+      - Validates that the source `.lay` document's physical `widthMm` and `heightMm` match the active document before importing; rejects mismatched paper sizes with a clear message showing both dimensions.
+      - Imports only the `ImageAsset`s referenced by incoming pages (preserving 100% original `Uint8Array` bytes), resolves any `assetId` collisions safely, and updates all `ImageObject.assetId` references including inside nested `GroupObject`s.
+      - Generates fresh unique IDs for all imported pages, guidelines, objects, and group children while preserving page names, z-order, rotations, shapes, dimensions, text formatting, and freehand Pen/Highlighter strokes.
+    - Records the entire multi-page import as a **single undoable operation** (`pushHistory(currentDoc)`), keeping imported `ImageAsset`s in `doc.assets` so **Undo** followed by **Redo** restores all imported pages and images, while `serializeDocumentToLayBlob` in `src/services/layFileService.ts` filters out unreferenced orphan assets when saving `.lay` archives.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference

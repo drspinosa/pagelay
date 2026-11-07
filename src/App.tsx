@@ -27,6 +27,7 @@ import {
   createNewDocument,
   createSampleExhibitionDocument,
   generateId,
+  prepareImportedPagesFromDocument,
 } from './model/documentFactory';
 import {
   CSS_PX_PER_MM_AT_100,
@@ -50,7 +51,13 @@ import { EditorCanvas } from './components/EditorCanvas';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { StatusBar } from './components/StatusBar';
 import { RULER_THICKNESS_PX } from './components/Rulers';
-import { ExportModal, NewDocumentModal, SaveAsModal } from './components/Modals';
+import {
+  ExportModal,
+  NewDocumentModal,
+  SaveAsModal,
+  SaveAsOutcome,
+  UnsavedChangesModal,
+} from './components/Modals';
 
 interface HistorySnapshot {
   paperSize: PaperFormat;
@@ -59,6 +66,26 @@ interface HistorySnapshot {
   heightMm: number;
   pages: PageData[];
 }
+
+type PendingReplacementAction =
+  | { type: 'open-new-modal' }
+  | {
+      type: 'create-blank';
+      name: string;
+      paperSize: PaperFormat;
+      orientation: Orientation;
+      widthMm: number;
+      heightMm: number;
+    }
+  | { type: 'open-picker' }
+  | { type: 'open-file'; file: File }
+  | { type: 'load-sample' };
+
+type SaveDocumentOutcome =
+  | 'saved-native'
+  | 'needs-fallback-modal'
+  | 'cancelled'
+  | 'failed';
 
 function createSnapshot(doc: PageLayDocument): HistorySnapshot {
   return {
@@ -114,14 +141,17 @@ export default function App() {
     null
   );
   const isSavingRef = useRef<boolean>(false);
+  const [isSavingInModal, setIsSavingInModal] = useState<boolean>(false);
 
-  // Synchronized refs to avoid stale closures during rapid Undo/Redo or drag commits
+  // Synchronized refs to avoid stale closures during rapid Undo/Redo, drag commits, or file drops
   const docRef = useRef<PageLayDocument>(doc);
   docRef.current = doc;
   const historyPastRef = useRef<HistorySnapshot[]>(historyPast);
   historyPastRef.current = historyPast;
   const historyFutureRef = useRef<HistorySnapshot[]>(historyFuture);
   historyFutureRef.current = historyFuture;
+  const isDirtyRef = useRef<boolean>(isDirty);
+  isDirtyRef.current = isDirty;
 
   // Clipboard for Copy / Paste
   const [clipboardObject, setClipboardObject] = useState<PageObject | null>(null);
@@ -129,6 +159,12 @@ export default function App() {
   // Modals & Notifications
   const [isNewModalOpen, setIsNewModalOpen] = useState<boolean>(false);
   const [isSaveAsModalOpen, setIsSaveAsModalOpen] = useState<boolean>(false);
+  const [isUnsavedModalOpen, setIsUnsavedModalOpen] = useState<boolean>(false);
+  const [pendingReplacementAction, setPendingReplacementAction] =
+    useState<PendingReplacementAction | null>(null);
+  const pendingReplacementRef = useRef<PendingReplacementAction | null>(null);
+  const newModalAuthorisedRef = useRef<boolean>(false);
+
   const [exportModalState, setExportModalState] = useState<{
     isOpen: boolean;
     tab: 'pdf' | 'image';
@@ -140,12 +176,24 @@ export default function App() {
 
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const hiddenImageInputRef = useRef<HTMLInputElement | null>(null);
+  const hiddenLayInputRef = useRef<HTMLInputElement | null>(null);
 
   // Keep browser document.title synchronized with the internal PageLay document name
   useEffect(() => {
     const cleanTitle = (doc.name || 'Untitled Document').trim();
     document.title = `${cleanTitle} — PageLay`;
   }, [doc.name]);
+
+  // Warn before browser tab close or refresh when the active document has unsaved changes
+  useEffect(() => {
+    if (!isDirty) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isDirty]);
 
   const showToast = useCallback((text: string, type: 'info' | 'error' = 'info') => {
     setToastMessage({ text, type });
@@ -216,19 +264,34 @@ export default function App() {
     return () => observer.disconnect();
   }, [fitPageToWorkspace, doc.widthMm, doc.heightMm]);
 
+  const markDirty = useCallback(() => {
+    isDirtyRef.current = true;
+    newModalAuthorisedRef.current = false;
+    setIsDirty(true);
+  }, []);
+
+  const markClean = useCallback(() => {
+    isDirtyRef.current = false;
+    newModalAuthorisedRef.current = false;
+    setIsDirty(false);
+  }, []);
+
   /**
    * Pushes current state onto history stack before a committed mutation.
    */
-  const pushHistory = useCallback((currentDoc?: PageLayDocument) => {
-    const snapshotSource = currentDoc ?? docRef.current;
-    const snap = createSnapshot(snapshotSource);
-    const nextPast = [...historyPastRef.current.slice(-39), snap];
-    historyPastRef.current = nextPast;
-    historyFutureRef.current = [];
-    setHistoryPast(nextPast);
-    setHistoryFuture([]);
-    setIsDirty(true);
-  }, []);
+  const pushHistory = useCallback(
+    (currentDoc?: PageLayDocument) => {
+      const snapshotSource = currentDoc ?? docRef.current;
+      const snap = createSnapshot(snapshotSource);
+      const nextPast = [...historyPastRef.current.slice(-39), snap];
+      historyPastRef.current = nextPast;
+      historyFutureRef.current = [];
+      setHistoryPast(nextPast);
+      setHistoryFuture([]);
+      markDirty();
+    },
+    [markDirty]
+  );
 
   /**
    * Synchronously clears both undo and redo history stacks and refs (used only when creating or opening a new document).
@@ -276,8 +339,8 @@ export default function App() {
     setSelectedGuideId(null);
     setCroppingImageId(null);
     setEditingTextId(null);
-    setIsDirty(true);
-  }, []);
+    markDirty();
+  }, [markDirty]);
 
   const handleRedo = useCallback(() => {
     const future = historyFutureRef.current;
@@ -315,8 +378,8 @@ export default function App() {
     setSelectedGuideId(null);
     setCroppingImageId(null);
     setEditingTextId(null);
-    setIsDirty(true);
-  }, []);
+    markDirty();
+  }, [markDirty]);
 
   const currentPage = doc.pages[activePageIndex] || doc.pages[0];
   const selectedObject =
@@ -422,9 +485,9 @@ export default function App() {
       };
       docRef.current = nextDoc;
       setDoc(nextDoc);
-      setIsDirty(true);
+      markDirty();
     },
-    [activePageIndex, pushHistory]
+    [activePageIndex, pushHistory, markDirty]
   );
 
   /**
@@ -452,9 +515,9 @@ export default function App() {
       };
       docRef.current = nextDoc;
       setDoc(nextDoc);
-      setIsDirty(true);
+      markDirty();
     },
-    [activePageIndex, pushHistory]
+    [activePageIndex, pushHistory, markDirty]
   );
 
   /**
@@ -638,15 +701,25 @@ export default function App() {
    * - In environments where `FileSystemFileHandle` is unavailable, opens `SaveAsModal` for the
    *   download fallback.
    */
-  const handleSaveDocument = useCallback(async () => {
-    if (isSavingRef.current) return;
+  /**
+   * Standard Save (`Ctrl/Cmd+S` or Save button):
+   * - If `activeFileHandle` exists, overwrites the same `.lay` file in place via `createWritable()`
+   *   without opening a Save As dialog or creating duplicate downloads.
+   * - If the document has never been saved (or was opened without a writable handle), prompts once
+   *   for a filename and location, retains the returned handle, and writes the `.lay` file.
+   * - In environments where `FileSystemFileHandle` is unavailable, opens `SaveAsModal` for the
+   *   download fallback.
+   */
+  const handleSaveDocument = useCallback(async (): Promise<SaveDocumentOutcome> => {
+    if (isSavingRef.current) return 'cancelled';
     isSavingRef.current = true;
+    setIsSavingInModal(true);
     try {
       const hadExistingHandle = Boolean(activeFileHandle);
       const res = await saveDocumentToExistingOrNewHandle(doc, activeFileHandle);
 
       if (res.status === 'cancelled') {
-        return;
+        return 'cancelled';
       }
 
       if (res.status === 'permission-denied') {
@@ -654,12 +727,12 @@ export default function App() {
           `Write permission was denied for "${res.filename}". Use Save As... to choose a writable file location.`,
           'error'
         );
-        return;
+        return 'failed';
       }
 
       if (res.status === 'needs-fallback-modal') {
         setIsSaveAsModalOpen(true);
-        return;
+        return 'needs-fallback-modal';
       }
 
       if (res.status === 'saved-native') {
@@ -669,7 +742,7 @@ export default function App() {
           name: res.documentName,
           updatedAt: new Date().toISOString(),
         }));
-        setIsDirty(false);
+        markClean();
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -678,16 +751,20 @@ export default function App() {
         } else {
           showToast(`Saved "${res.filename}" (Original images preserved)`);
         }
+        return 'saved-native';
       }
+      return 'failed';
     } catch (err) {
       showToast(
         err instanceof Error ? err.message : 'Failed to save .lay file.',
         'error'
       );
+      return 'failed';
     } finally {
       isSavingRef.current = false;
+      setIsSavingInModal(false);
     }
-  }, [doc, activeFileHandle, showToast]);
+  }, [doc, activeFileHandle, markClean, showToast]);
 
   /**
    * Save As (`Ctrl/Cmd+Shift+S` or Save As... button):
@@ -725,7 +802,7 @@ export default function App() {
           name: res.documentName,
           updatedAt: new Date().toISOString(),
         }));
-        setIsDirty(false);
+        markClean();
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -741,7 +818,7 @@ export default function App() {
     } finally {
       isSavingRef.current = false;
     }
-  }, [doc, activeFileHandle, showToast]);
+  }, [doc, activeFileHandle, markClean, showToast]);
 
   /**
    * Opens an existing `.lay` document using `showOpenFilePicker()` where supported,
@@ -758,6 +835,7 @@ export default function App() {
         return false;
       }
       const loaded = res.doc;
+      docRef.current = loaded;
       setDoc(loaded);
       setActiveFileHandle(res.fileHandle ?? null);
       setActivePageIndex(0);
@@ -767,7 +845,7 @@ export default function App() {
       setCroppingImageId(null);
       setEditingTextId(null);
       clearHistory();
-      setIsDirty(false);
+      markClean();
       setLastSavedAt(
         new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       );
@@ -783,18 +861,35 @@ export default function App() {
       );
       return false;
     }
-  }, [clearHistory, fitPageToWorkspace, showToast]);
+  }, [clearHistory, fitPageToWorkspace, markClean, showToast]);
 
   /**
-   * Keyboard shortcuts (Undo, Redo, Save, Save As, Select All, Group, Ungroup, Lock/Unlock, Delete, Copy, Paste, Duplicate, Escape, Arrow Nudge).
+   *Keyboard shortcuts (Undo, Redo, Save, Save As, Select All, Group, Ungroup, Lock/Unlock, Delete, Copy, Paste, Duplicate, Escape, Arrow Nudge).
    */
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       // Do not intercept global editor shortcuts while a modal dialog is open
-      if (isNewModalOpen || isSaveAsModalOpen || exportModalState.isOpen) {
+      if (
+        isNewModalOpen ||
+        isSaveAsModalOpen ||
+        isUnsavedModalOpen ||
+        exportModalState.isOpen
+      ) {
         if (e.key === 'Escape') {
-          setIsNewModalOpen(false);
-          setIsSaveAsModalOpen(false);
+          if (isUnsavedModalOpen && !isSavingRef.current) {
+            setIsUnsavedModalOpen(false);
+            setPendingReplacementAction(null);
+            pendingReplacementRef.current = null;
+          }
+          if (isNewModalOpen) {
+            setIsNewModalOpen(false);
+            newModalAuthorisedRef.current = false;
+          }
+          if (isSaveAsModalOpen && !isSavingRef.current) {
+            setIsSaveAsModalOpen(false);
+            setPendingReplacementAction(null);
+            pendingReplacementRef.current = null;
+          }
           setExportModalState((prev) => ({ ...prev, isOpen: false }));
         }
         return;
@@ -1060,6 +1155,7 @@ export default function App() {
     clipboardObject,
     isNewModalOpen,
     isSaveAsModalOpen,
+    isUnsavedModalOpen,
     exportModalState.isOpen,
     pushHistory,
     handleUndo,
@@ -1077,45 +1173,286 @@ export default function App() {
   ]);
 
   /**
-   * Handles importing one or more image files (or a dropped .lay file) while preserving 100% original bytes.
+   * Loads a `.lay` File object (from `<input type="file">` or drag-and-drop) and replaces the active document
+   * only after archive parsing succeeds.
    */
-  const handleFilesImported = useCallback(
-    async (files: FileList, dropMm?: { x: number; y: number }) => {
-      const fileArray = Array.from(files);
-      if (fileArray.length === 0) return;
+  const openLayFileAndApply = useCallback(
+    async (file: File) => {
+      try {
+        const loadedDoc = await loadDocumentFromLayFile(file);
+        docRef.current = loadedDoc;
+        setDoc(loadedDoc);
+        // A File object from file input or drag-and-drop does not provide a writable FileSystemFileHandle
+        setActiveFileHandle(null);
+        setActivePageIndex(0);
+        setSelectedObjectId(null);
+        setSelectedObjectIds([]);
+        setSelectedGuideId(null);
+        setCroppingImageId(null);
+        setEditingTextId(null);
+        clearHistory();
+        markClean();
+        setLastSavedAt(null);
+        setTimeout(() => {
+          fitPageToWorkspace(loadedDoc.widthMm, loadedDoc.heightMm, 'page');
+        }, 50);
+        showToast(
+          `Opened "${loadedDoc.name}.lay" (choose a save location when saving changes)`
+        );
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Failed to open .lay document.',
+          'error'
+        );
+      }
+    },
+    [clearHistory, fitPageToWorkspace, markClean, showToast]
+  );
 
-      const layFile = fileArray.find((f) => f.name.toLowerCase().endsWith('.lay'));
-      if (layFile) {
-        try {
-          const loadedDoc = await loadDocumentFromLayFile(layFile);
-          setDoc(loadedDoc);
-          // A dropped File object does not provide a writable FileSystemFileHandle
+  /**
+   * Immediately loads the rich A0 Exhibition Stand Layout sample document.
+   */
+  const loadSampleDocumentImmediate = useCallback(async () => {
+    try {
+      const sampleDoc = await createSampleExhibitionDocument();
+      docRef.current = sampleDoc;
+      setDoc(sampleDoc);
+      setActiveFileHandle(null);
+      setActivePageIndex(0);
+      setSelectedObjectId(null);
+      setSelectedObjectIds([]);
+      setSelectedGuideId(null);
+      setCroppingImageId(null);
+      setEditingTextId(null);
+      clearHistory();
+      markClean();
+      setLastSavedAt(null);
+      setTimeout(() => {
+        fitPageToWorkspace(sampleDoc.widthMm, sampleDoc.heightMm, 'page');
+      }, 50);
+      showToast('Loaded Sample A0 Exhibition Stand Layout (1189 × 841 mm)');
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : 'Failed to create sample document.',
+        'error'
+      );
+    }
+  }, [clearHistory, fitPageToWorkspace, markClean, showToast]);
+
+  /**
+   * Executes a document-replacing action after unsaved changes have been saved or explicitly discarded.
+   */
+  const executeReplacementAction = useCallback(
+    async (action: PendingReplacementAction) => {
+      switch (action.type) {
+        case 'open-new-modal': {
+          newModalAuthorisedRef.current = true;
+          setIsNewModalOpen(true);
+          return;
+        }
+        case 'create-blank': {
+          newModalAuthorisedRef.current = false;
+          setIsNewModalOpen(false);
+          const fresh = createNewDocument(
+            action.name,
+            action.paperSize,
+            action.orientation,
+            action.widthMm,
+            action.heightMm
+          );
+          fresh.widthMm = action.widthMm;
+          fresh.heightMm = action.heightMm;
+          docRef.current = fresh;
+          setDoc(fresh);
           setActiveFileHandle(null);
           setActivePageIndex(0);
           setSelectedObjectId(null);
           setSelectedObjectIds([]);
           setSelectedGuideId(null);
+          setCroppingImageId(null);
+          setEditingTextId(null);
           clearHistory();
-          setIsDirty(false);
+          markClean();
           setLastSavedAt(null);
           setTimeout(() => {
-            fitPageToWorkspace(loadedDoc.widthMm, loadedDoc.heightMm, 'page');
+            fitPageToWorkspace(action.widthMm, action.heightMm, 'page');
           }, 50);
           showToast(
-            `Opened "${loadedDoc.name}.lay" (choose a save location when saving changes)`
+            `Created ${action.paperSize} ${action.orientation} (${action.widthMm} × ${action.heightMm} mm)`
           );
-        } catch (err) {
-          showToast(
-            err instanceof Error ? err.message : 'Failed to open .lay document.',
-            'error'
-          );
+          return;
         }
+        case 'open-picker': {
+          newModalAuthorisedRef.current = false;
+          const useFallbackInput = await handleTriggerOpenNativePicker();
+          if (useFallbackInput) {
+            hiddenLayInputRef.current?.click();
+          }
+          return;
+        }
+        case 'open-file': {
+          newModalAuthorisedRef.current = false;
+          await openLayFileAndApply(action.file);
+          return;
+        }
+        case 'load-sample': {
+          newModalAuthorisedRef.current = false;
+          setIsNewModalOpen(false);
+          await loadSampleDocumentImmediate();
+          return;
+        }
+      }
+    },
+    [
+      clearHistory,
+      fitPageToWorkspace,
+      handleTriggerOpenNativePicker,
+      loadSampleDocumentImmediate,
+      markClean,
+      openLayFileAndApply,
+      showToast,
+    ]
+  );
+
+  /**
+   * Centralised guard for all actions that can replace the active document:
+   * - New Document
+   * - Open `.lay` Document (native picker, file input, or canvas drag-and-drop)
+   * - Load Sample A0 (toolbar, empty-page bar, or inside New Document modal)
+   */
+  const requestDocumentReplacement = useCallback(
+    (action: PendingReplacementAction) => {
+      const currentlyDirty = isDirtyRef.current || isDirty;
+      const alreadyAuthorisedFromNewModal =
+        (action.type === 'create-blank' || action.type === 'load-sample') &&
+        isNewModalOpen &&
+        newModalAuthorisedRef.current;
+
+      if (!currentlyDirty || alreadyAuthorisedFromNewModal) {
+        void executeReplacementAction(action);
         return;
       }
 
-      pushHistory(doc);
+      pendingReplacementRef.current = action;
+      setPendingReplacementAction(action);
+      setIsUnsavedModalOpen(true);
+    },
+    [isDirty, isNewModalOpen, executeReplacementAction]
+  );
 
-      const newAssets = { ...doc.assets };
+  const handleLoadSampleDocument = useCallback(() => {
+    requestDocumentReplacement({ type: 'load-sample' });
+  }, [requestDocumentReplacement]);
+
+  /**
+   * Handles importing pages from a `.lay` file dropped onto (or selected from) the Pages sidebar:
+   * - Appends all pages from the `.lay` file to the current document without replacing existing pages.
+   * - Validates that physical paper dimensions (`widthMm` × `heightMm`) match the current document.
+   * - Imports all referenced original image assets (`Uint8Array`) and resolves ID collisions safely.
+   * - Records the entire multi-page import as a single undoable operation.
+   */
+  const handleImportPagesFromSidebar = useCallback(
+    async (files: File[]) => {
+      if (!files || files.length === 0) return;
+
+      const layFile = files.find((f) => f.name.toLowerCase().endsWith('.lay'));
+      if (!layFile) {
+        showToast(
+          'Only PageLay (.lay) files can be dropped onto the Pages panel to import pages.',
+          'error'
+        );
+        return;
+      }
+
+      let sourceDoc: PageLayDocument;
+      try {
+        sourceDoc = await loadDocumentFromLayFile(layFile);
+      } catch (err) {
+        showToast(
+          err instanceof Error
+            ? err.message
+            : 'Failed to read .lay document for page import.',
+          'error'
+        );
+        return;
+      }
+
+      const currentDoc = docRef.current;
+      const widthMismatch = Math.abs(sourceDoc.widthMm - currentDoc.widthMm) > 0.01;
+      const heightMismatch = Math.abs(sourceDoc.heightMm - currentDoc.heightMm) > 0.01;
+
+      if (widthMismatch || heightMismatch) {
+        // Clean up temporary object URLs created while parsing the incompatible source document
+        for (const asset of Object.values(sourceDoc.assets)) {
+          try {
+            URL.revokeObjectURL(asset.objectUrl);
+          } catch {
+            // Ignore URL revocation errors
+          }
+        }
+        showToast(
+          `Cannot import pages: "${sourceDoc.name}.lay" uses ${sourceDoc.paperSize} (${sourceDoc.widthMm} × ${sourceDoc.heightMm} mm), which does not match the current document (${currentDoc.paperSize}, ${currentDoc.widthMm} × ${currentDoc.heightMm} mm).`,
+          'error'
+        );
+        return;
+      }
+
+      if (!sourceDoc.pages || sourceDoc.pages.length === 0) {
+        showToast('The selected .lay document contains no pages to import.', 'error');
+        return;
+      }
+
+      const { importedPages, mergedAssets } = prepareImportedPagesFromDocument(
+        sourceDoc,
+        currentDoc
+      );
+
+      // Single undoable operation for the entire page import
+      pushHistory(currentDoc);
+
+      const firstImportedPageIndex = currentDoc.pages.length;
+      const nextDoc: PageLayDocument = {
+        ...currentDoc,
+        assets: mergedAssets,
+        pages: [...currentDoc.pages, ...importedPages],
+        updatedAt: new Date().toISOString(),
+      };
+      docRef.current = nextDoc;
+      setDoc(nextDoc);
+      setActivePageIndex(firstImportedPageIndex);
+      setSelectedObjectId(null);
+      setSelectedObjectIds([]);
+      setSelectedGuideId(null);
+      setCroppingImageId(null);
+      setEditingTextId(null);
+      markDirty();
+
+      showToast(
+        `Imported ${importedPages.length} page${
+          importedPages.length > 1 ? 's' : ''
+        } from "${sourceDoc.name}.lay"`
+      );
+    },
+    [pushHistory, markDirty, showToast]
+  );
+
+  /**
+   * Handles importing one or more image files (or a dropped .lay file on the canvas) while preserving 100% original bytes.
+   * Dropped `.lay` files on the canvas pass through the centralised unsaved-changes guard before replacing the document.
+   */
+  const handleFilesImported = useCallback(
+    async (files: File[] | FileList, dropMm?: { x: number; y: number }) => {
+      const fileArray = Array.from(files);
+      if (fileArray.length === 0) return;
+
+      const layFile = fileArray.find((f) => f.name.toLowerCase().endsWith('.lay'));
+      if (layFile) {
+        requestDocumentReplacement({ type: 'open-file', file: layFile });
+        return;
+      }
+
+      const currentDoc = docRef.current;
+      const newAssets = { ...currentDoc.assets };
       const newImageObjects: ImageObject[] = [];
 
       for (let i = 0; i < fileArray.length; i++) {
@@ -1125,19 +1462,25 @@ export default function App() {
           newAssets[asset.id] = asset;
 
           const aspect = asset.widthPx / Math.max(1, asset.heightPx);
-          let placedW = formatMm(doc.widthMm * 0.38, 1);
+          let placedW = formatMm(currentDoc.widthMm * 0.38, 1);
           let placedH = formatMm(placedW / aspect, 1);
-          if (placedH > doc.heightMm * 0.65) {
-            placedH = formatMm(doc.heightMm * 0.65, 1);
+          if (placedH > currentDoc.heightMm * 0.65) {
+            placedH = formatMm(currentDoc.heightMm * 0.65, 1);
             placedW = formatMm(placedH * aspect, 1);
           }
 
           const baseX = dropMm
-            ? Math.max(0, Math.min(doc.widthMm - placedW, dropMm.x - placedW / 2))
-            : (doc.widthMm - placedW) / 2;
+            ? Math.max(
+                0,
+                Math.min(currentDoc.widthMm - placedW, dropMm.x - placedW / 2)
+              )
+            : (currentDoc.widthMm - placedW) / 2;
           const baseY = dropMm
-            ? Math.max(0, Math.min(doc.heightMm - placedH, dropMm.y - placedH / 2))
-            : (doc.heightMm - placedH) / 2;
+            ? Math.max(
+                0,
+                Math.min(currentDoc.heightMm - placedH, dropMm.y - placedH / 2)
+              )
+            : (currentDoc.heightMm - placedH) / 2;
 
           const offsetMm = i * 20;
           const imgObj: ImageObject = {
@@ -1166,18 +1509,24 @@ export default function App() {
       }
 
       if (newImageObjects.length > 0) {
-        setDoc((prev) => ({
-          ...prev,
+        pushHistory(currentDoc);
+        const nextDoc: PageLayDocument = {
+          ...currentDoc,
           assets: newAssets,
-          pages: prev.pages.map((p, idx) =>
+          pages: currentDoc.pages.map((p, idx) =>
             idx === activePageIndex
               ? { ...p, objects: [...p.objects, ...newImageObjects] }
               : p
           ),
           updatedAt: new Date().toISOString(),
-        }));
-        setSelectedObjectId(newImageObjects[newImageObjects.length - 1].id);
+        };
+        docRef.current = nextDoc;
+        setDoc(nextDoc);
+        const lastNewId = newImageObjects[newImageObjects.length - 1].id;
+        setSelectedObjectId(lastNewId);
+        setSelectedObjectIds([lastNewId]);
         setActiveTool('select');
+        markDirty();
         showToast(
           `Imported ${newImageObjects.length} image${
             newImageObjects.length > 1 ? 's' : ''
@@ -1185,40 +1534,15 @@ export default function App() {
         );
       }
     },
-    [doc, activePageIndex, pushHistory, fitPageToWorkspace, showToast]
+    [activePageIndex, pushHistory, markDirty, requestDocumentReplacement, showToast]
   );
 
-  /**
-   * Loads the rich A0 Exhibition Stand Layout sample with 3 high-res renders, red arrows & dimensions.
-   */
-  const handleLoadSampleDocument = useCallback(async () => {
-    try {
-      const sampleDoc = await createSampleExhibitionDocument();
-      setDoc(sampleDoc);
-      setActiveFileHandle(null);
-      setActivePageIndex(0);
-      setSelectedObjectId(null);
-      setSelectedObjectIds([]);
-      setSelectedGuideId(null);
-      setCroppingImageId(null);
-      setEditingTextId(null);
-      clearHistory();
-      setIsDirty(false);
-      setLastSavedAt(null);
-      setTimeout(() => {
-        fitPageToWorkspace(sampleDoc.widthMm, sampleDoc.heightMm, 'page');
-      }, 50);
-      showToast('Loaded Sample A0 Exhibition Stand Layout (1189 × 841 mm)');
-    } catch (err) {
-      showToast(
-        err instanceof Error ? err.message : 'Failed to create sample document.',
-        'error'
-      );
-    }
-  }, [clearHistory, fitPageToWorkspace, showToast]);
-
   return (
-    <div className="relative w-full h-dvh flex flex-col bg-slate-100 text-slate-900 overflow-hidden overscroll-none select-none">
+    <div
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => e.preventDefault()}
+      className="relative w-full h-dvh flex flex-col bg-slate-100 text-slate-900 overflow-hidden overscroll-none select-none"
+    >
       {/* Hidden Image File Picker for Empty-State Trigger */}
       <input
         ref={hiddenImageInputRef}
@@ -1227,8 +1551,23 @@ export default function App() {
         multiple
         className="hidden"
         onChange={(e) => {
-          if (e.target.files && e.target.files.length > 0) {
-            handleFilesImported(e.target.files);
+          const picked = Array.from(e.target.files ?? []);
+          if (picked.length > 0) {
+            void handleFilesImported(picked);
+          }
+          e.target.value = '';
+        }}
+      />
+      {/* Hidden .lay File Picker for Fallback Open After Unsaved Changes Check */}
+      <input
+        ref={hiddenLayInputRef}
+        type="file"
+        accept=".lay,application/zip,application/octet-stream"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            void openLayFileAndApply(file);
           }
           e.target.value = '';
         }}
@@ -1239,7 +1578,7 @@ export default function App() {
         documentName={doc.name}
         onChangeDocumentName={(name) => {
           setDoc((prev) => ({ ...prev, name }));
-          setIsDirty(true);
+          markDirty();
         }}
         activeTool={activeTool}
         onSelectTool={(t) => {
@@ -1266,33 +1605,11 @@ export default function App() {
         canRedo={historyFuture.length > 0}
         onUndo={handleUndo}
         onRedo={handleRedo}
-        onNewDocument={() => setIsNewModalOpen(true)}
+        onNewDocument={() => requestDocumentReplacement({ type: 'open-new-modal' })}
+        onRequestOpenDocument={() => requestDocumentReplacement({ type: 'open-picker' })}
         onTriggerOpenNativePicker={handleTriggerOpenNativePicker}
-        onOpenLayFile={async (file) => {
-          try {
-            const loaded = await loadDocumentFromLayFile(file);
-            setDoc(loaded);
-            // Opening via fallback <input type="file"> does not grant a writable FileSystemFileHandle
-            setActiveFileHandle(null);
-            setActivePageIndex(0);
-            setSelectedObjectId(null);
-            setSelectedObjectIds([]);
-            setSelectedGuideId(null);
-            clearHistory();
-            setIsDirty(false);
-            setLastSavedAt(null);
-            setTimeout(() => {
-              fitPageToWorkspace(loaded.widthMm, loaded.heightMm, 'page');
-            }, 50);
-            showToast(
-              `Opened "${loaded.name}.lay" (choose a save location when saving changes)`
-            );
-          } catch (err) {
-            showToast(
-              err instanceof Error ? err.message : 'Could not open .lay file.',
-              'error'
-            );
-          }
+        onOpenLayFile={(file) => {
+          requestDocumentReplacement({ type: 'open-file', file });
         }}
         onSaveLayFile={() => {
           void handleSaveDocument();
@@ -1309,29 +1626,34 @@ export default function App() {
         snapToObjects={doc.snapToObjects}
         angleSnapIncrementDeg={doc.angleSnapIncrementDeg ?? 15}
         precisionMode={Boolean(doc.precisionMode)}
-        onToggleShowGuides={() =>
-          setDoc((prev) => ({ ...prev, showGuides: !prev.showGuides }))
-        }
-        onToggleLockGuides={() =>
-          setDoc((prev) => ({ ...prev, lockGuides: !prev.lockGuides }))
-        }
-        onToggleSnapToGuides={() =>
-          setDoc((prev) => ({ ...prev, snapToGuides: !prev.snapToGuides }))
-        }
-        onToggleSnapToPageEdges={() =>
-          setDoc((prev) => ({ ...prev, snapToPageEdges: !prev.snapToPageEdges }))
-        }
-        onToggleSnapToObjects={() =>
-          setDoc((prev) => ({ ...prev, snapToObjects: !prev.snapToObjects }))
-        }
+        onToggleShowGuides={() => {
+          setDoc((prev) => ({ ...prev, showGuides: !prev.showGuides }));
+          markDirty();
+        }}
+        onToggleLockGuides={() => {
+          setDoc((prev) => ({ ...prev, lockGuides: !prev.lockGuides }));
+          markDirty();
+        }}
+        onToggleSnapToGuides={() => {
+          setDoc((prev) => ({ ...prev, snapToGuides: !prev.snapToGuides }));
+          markDirty();
+        }}
+        onToggleSnapToPageEdges={() => {
+          setDoc((prev) => ({ ...prev, snapToPageEdges: !prev.snapToPageEdges }));
+          markDirty();
+        }}
+        onToggleSnapToObjects={() => {
+          setDoc((prev) => ({ ...prev, snapToObjects: !prev.snapToObjects }));
+          markDirty();
+        }}
         onChangeAngleSnapIncrement={(deg) => {
           const clamped = Math.max(1, Math.min(45, Math.round(deg || 15)));
           setDoc((prev) => ({ ...prev, angleSnapIncrementDeg: clamped }));
-          setIsDirty(true);
+          markDirty();
         }}
         onTogglePrecisionMode={() => {
           setDoc((prev) => ({ ...prev, precisionMode: !prev.precisionMode }));
-          setIsDirty(true);
+          markDirty();
         }}
         onClearGuides={() => {
           pushHistory(doc);
@@ -1451,6 +1773,9 @@ export default function App() {
                 setDoc((prev) => ({ ...prev, pages: nextPages }));
                 setActivePageIndex(targetIdx);
               }}
+              onDropFilesOnPagesSidebar={(droppedFiles) => {
+                void handleImportPagesFromSidebar(droppedFiles);
+              }}
             />
           </div>
         )}
@@ -1547,7 +1872,7 @@ export default function App() {
               ),
               updatedAt: new Date().toISOString(),
             }));
-            setIsDirty(true);
+            markDirty();
           }}
           onDropFiles={handleFilesImported}
           onLoadSampleDocument={handleLoadSampleDocument}
@@ -1722,28 +2047,23 @@ export default function App() {
       {/* MODALS */}
       <NewDocumentModal
         isOpen={isNewModalOpen}
-        onClose={() => setIsNewModalOpen(false)}
-        onCreate={(name, paperSize, orientation, widthMm, heightMm) => {
-          const fresh = createNewDocument(name, paperSize, orientation, widthMm, heightMm);
-          fresh.widthMm = widthMm;
-          fresh.heightMm = heightMm;
-          setDoc(fresh);
-          setActiveFileHandle(null);
-          setActivePageIndex(0);
-          setSelectedObjectId(null);
-          setSelectedObjectIds([]);
-          setSelectedGuideId(null);
-          setCroppingImageId(null);
-          setEditingTextId(null);
-          clearHistory();
-          setIsDirty(false);
-          setLastSavedAt(null);
-          setTimeout(() => {
-            fitPageToWorkspace(widthMm, heightMm, 'page');
-          }, 50);
-          showToast(`Created ${paperSize} ${orientation} (${widthMm} × ${heightMm} mm)`);
+        onClose={() => {
+          setIsNewModalOpen(false);
+          newModalAuthorisedRef.current = false;
         }}
-        onLoadSample={handleLoadSampleDocument}
+        onCreate={(name, paperSize, orientation, widthMm, heightMm) => {
+          requestDocumentReplacement({
+            type: 'create-blank',
+            name,
+            paperSize,
+            orientation,
+            widthMm,
+            heightMm,
+          });
+        }}
+        onLoadSample={() => {
+          requestDocumentReplacement({ type: 'load-sample' });
+        }}
       />
 
       <ExportModal
@@ -1773,12 +2093,74 @@ export default function App() {
         }}
       />
 
+      <UnsavedChangesModal
+        isOpen={isUnsavedModalOpen}
+        documentName={doc.name}
+        isSaving={isSavingInModal}
+        isNativeOverwriteSupported={
+          Boolean(activeFileHandle) ||
+          (typeof window !== 'undefined' &&
+            typeof (window as unknown as { showSaveFilePicker?: unknown })
+              .showSaveFilePicker === 'function')
+        }
+        onCancel={() => {
+          if (isSavingRef.current) return;
+          setIsUnsavedModalOpen(false);
+          setPendingReplacementAction(null);
+          pendingReplacementRef.current = null;
+        }}
+        onDiscardAndContinue={() => {
+          if (isSavingRef.current) return;
+          const pending = pendingReplacementRef.current;
+          setIsUnsavedModalOpen(false);
+          setPendingReplacementAction(null);
+          pendingReplacementRef.current = null;
+          if (pending) {
+            void executeReplacementAction(pending);
+          }
+        }}
+        onSaveAndContinue={async () => {
+          const outcome = await handleSaveDocument();
+          if (outcome === 'saved-native') {
+            const pending = pendingReplacementRef.current;
+            setIsUnsavedModalOpen(false);
+            setPendingReplacementAction(null);
+            pendingReplacementRef.current = null;
+            if (pending) {
+              await executeReplacementAction(pending);
+            }
+          } else if (outcome === 'needs-fallback-modal') {
+            // Keep pendingReplacementRef.current active while the user completes SaveAsModal
+            setIsUnsavedModalOpen(false);
+          } else {
+            // Cancelled or failed save: preserve the current document and do NOT continue
+            setIsUnsavedModalOpen(false);
+            setPendingReplacementAction(null);
+            pendingReplacementRef.current = null;
+          }
+        }}
+      />
+
       <SaveAsModal
         isOpen={isSaveAsModalOpen}
         currentName={doc.name}
-        onClose={() => setIsSaveAsModalOpen(false)}
-        onConfirmSaveAs={async (newName) => {
-          if (isSavingRef.current) return;
+        hasPendingReplacement={Boolean(pendingReplacementAction)}
+        onClose={() => {
+          setIsSaveAsModalOpen(false);
+          setPendingReplacementAction(null);
+          pendingReplacementRef.current = null;
+        }}
+        onAcknowledgeDownloadAndContinue={() => {
+          const pending = pendingReplacementRef.current;
+          setIsSaveAsModalOpen(false);
+          setPendingReplacementAction(null);
+          pendingReplacementRef.current = null;
+          if (pending) {
+            void executeReplacementAction(pending);
+          }
+        }}
+        onConfirmSaveAs={async (newName): Promise<SaveAsOutcome> => {
+          if (isSavingRef.current) return 'cancelled';
           isSavingRef.current = true;
           try {
             const res = await saveDocumentAsLayFileWithPicker(
@@ -1787,14 +2169,14 @@ export default function App() {
               activeFileHandle
             );
             if (res.status === 'cancelled') {
-              return;
+              return 'cancelled';
             }
             if (res.status === 'permission-denied') {
               showToast(
                 `Write permission was denied for "${res.filename}".`,
                 'error'
               );
-              return;
+              return 'failed';
             }
             if (res.status === 'saved-native') {
               setActiveFileHandle(res.fileHandle);
@@ -1804,25 +2186,37 @@ export default function App() {
               name: res.documentName,
               updatedAt: new Date().toISOString(),
             }));
-            setIsDirty(false);
+            markClean();
             setLastSavedAt(
               new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             );
-            setIsSaveAsModalOpen(false);
             if (res.status === 'saved-native') {
+              setIsSaveAsModalOpen(false);
               showToast(
                 `Saved "${res.filename}" — subsequent saves will update this file`
               );
+              const pending = pendingReplacementRef.current;
+              setPendingReplacementAction(null);
+              pendingReplacementRef.current = null;
+              if (pending) {
+                await executeReplacementAction(pending);
+              }
+              return 'saved-native';
             } else {
               showToast(
                 `Downloaded "${res.filename}" (direct file overwrite is unavailable in this browser environment)`
               );
+              if (!pendingReplacementRef.current) {
+                setIsSaveAsModalOpen(false);
+              }
+              return 'download-initiated';
             }
           } catch (err) {
             showToast(
               err instanceof Error ? err.message : 'Failed to save .lay file.',
               'error'
             );
+            return 'failed';
           } finally {
             isSavingRef.current = false;
           }

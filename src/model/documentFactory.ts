@@ -102,6 +102,134 @@ export function clonePage(page: PageData, newIndex: number): PageData {
 }
 
 /**
+ * Collects all image `assetId`s referenced by objects across the given pages,
+ * traversing nested `group` objects recursively.
+ */
+export function collectReferencedAssetIds(pages: PageData[]): Set<string> {
+  const referenced = new Set<string>();
+  const walkObjects = (objects: PageObject[]) => {
+    for (const obj of objects) {
+      if (!obj) continue;
+      if (obj.type === 'image' && obj.assetId) {
+        referenced.add(obj.assetId);
+      } else if (obj.type === 'group' && Array.isArray(obj.children)) {
+        walkObjects(obj.children);
+      }
+    }
+  };
+  for (const page of pages) {
+    if (page && Array.isArray(page.objects)) {
+      walkObjects(page.objects);
+    }
+  }
+  return referenced;
+}
+
+function areUint8ArraysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function cloneObjectForPageImport(
+  obj: PageObject,
+  assetIdMap: Map<string, string>
+): PageObject {
+  const cloned = JSON.parse(JSON.stringify(obj)) as PageObject;
+  cloned.id = generateId(obj.type);
+  if (cloned.type === 'image') {
+    cloned.assetId = assetIdMap.get(cloned.assetId) ?? cloned.assetId;
+  } else if (cloned.type === 'group' && Array.isArray(cloned.children)) {
+    cloned.children = cloned.children.map((child) =>
+      cloneObjectForPageImport(child, assetIdMap)
+    );
+  }
+  return cloned;
+}
+
+/**
+ * Prepares all pages and referenced untouched original image assets from a source `.lay` document
+ * so they can be appended to `destDoc` as a single undoable operation:
+ * - Only imports assets actually referenced by `sourceDoc.pages`.
+ * - Preserves 100% original image bytes (`Uint8Array`) without recompression or downsampling.
+ * - Resolves any `assetId` collisions safely and updates all image object references (including inside groups).
+ * - Generates fresh unique IDs for all imported pages, guidelines, objects, and nested group children.
+ * - Preserves original page names, object positions, rotations, z-order, freehand strokes, and formatting.
+ */
+export function prepareImportedPagesFromDocument(
+  sourceDoc: PageLayDocument,
+  destDoc: PageLayDocument
+): {
+  importedPages: PageData[];
+  mergedAssets: Record<string, ImageAsset>;
+} {
+  const referencedAssetIds = collectReferencedAssetIds(sourceDoc.pages);
+  const mergedAssets: Record<string, ImageAsset> = { ...destDoc.assets };
+  const assetIdMap = new Map<string, string>();
+
+  for (const [sourceAssetId, sourceAsset] of Object.entries(sourceDoc.assets)) {
+    if (!referencedAssetIds.has(sourceAssetId)) {
+      try {
+        URL.revokeObjectURL(sourceAsset.objectUrl);
+      } catch {
+        // Ignore URL revocation errors
+      }
+      continue;
+    }
+
+    const existing = mergedAssets[sourceAssetId];
+    if (!existing) {
+      mergedAssets[sourceAssetId] = sourceAsset;
+      assetIdMap.set(sourceAssetId, sourceAssetId);
+    } else if (
+      existing.fileSizeBytes === sourceAsset.fileSizeBytes &&
+      existing.mimeType === sourceAsset.mimeType &&
+      existing.widthPx === sourceAsset.widthPx &&
+      existing.heightPx === sourceAsset.heightPx &&
+      areUint8ArraysEqual(existing.originalBytes, sourceAsset.originalBytes)
+    ) {
+      // Exact same binary asset already exists under this ID
+      assetIdMap.set(sourceAssetId, sourceAssetId);
+      try {
+        URL.revokeObjectURL(sourceAsset.objectUrl);
+      } catch {
+        // Ignore URL revocation errors
+      }
+    } else {
+      // Resolve ID collision by assigning a new unique asset ID
+      let newAssetId = generateId('asset');
+      while (mergedAssets[newAssetId]) {
+        newAssetId = generateId('asset');
+      }
+      mergedAssets[newAssetId] = {
+        ...sourceAsset,
+        id: newAssetId,
+      };
+      assetIdMap.set(sourceAssetId, newAssetId);
+    }
+  }
+
+  const importedPages: PageData[] = sourceDoc.pages.map((sourcePage, idx) => ({
+    id: generateId('page'),
+    name: (sourcePage.name || '').trim() || `Imported Page ${idx + 1}`,
+    guidelines: (sourcePage.guidelines || []).map((g) => ({
+      ...g,
+      id: generateId('guide'),
+    })),
+    objects: (sourcePage.objects || []).map((o) =>
+      cloneObjectForPageImport(o, assetIdMap)
+    ),
+  }));
+
+  return {
+    importedPages,
+    mergedAssets,
+  };
+}
+
+/**
  * Helper to generate a real high-resolution PNG Uint8Array in the browser
  * for the Sample A0 Exhibition Stand Layout so users can test full-resolution
  * non-destructive cropping, effective DPI readouts, .lay saving, and PDF export.
