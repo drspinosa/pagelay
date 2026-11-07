@@ -25,12 +25,17 @@ All operations run locally in your browser with zero external cloud dependencies
 - **Live Effective Print DPI Inspector**: Automatically computes and displays the real effective print resolution (`DPI`) based on the original pixel dimensions, active crop region, and placed physical size in millimetres, warning when resolution drops below `100 DPI`.
 
 ### 3. Rich Layout & Annotation Tools
+- **Freehand Pen, Freehand Highlighter & Basic Eraser**:
+  - **Freehand Pen**: Draw smooth freehand annotations, circles, underlines, or notes with mouse, finger, or stylus. Includes a Snipping Tool-style popover with 12 preset colours, thickness slider (`0.3 mm`–`5.0 mm`), and live stroke preview.
+  - **Freehand Highlighter**: Draw translucent (`~38%` opacity) marker strokes directly over plans, text, or images using a single non-compounding path with 6 fluorescent colours and a `2 mm`–`20 mm` thickness slider.
+  - **Basic Eraser**: Click or drag across any freehand Pen or Highlighter stroke to remove the entire stroke with full Undo/Redo support, while strictly protecting images, text, lines, dimensions, shapes, and rectangular Area Highlights.
+  - **Non-Destructive Vector Strokes**: Every freehand stroke is stored in canonical millimetres (`mm`) and can be selected, moved, resized, rotated, recoloured, grouped, saved in `.lay` archives, and exported as true PDF vector paths (`pdf-lib`).
 - **Text Boxes**: Multi-line text boxes with font family selection (PDF-guaranteed standard fonts + system fonts), point size (`pt`), bold/italic/underline, alignment, text colour, fill colour, border thickness (`mm`), and internal padding (`mm`).
 - **Technical Lines, Callout Arrows & Dimensions**:
   - **Lines**: Solid, dashed, or dotted lines with exact `X1, Y1` and `X2, Y2` millimetre coordinates and `Shift` / `Precision Mode` `1 mm` start & length + angle-constrained drawing/endpoint adjustment.
   - **Callout Arrows**: Configurable arrowheads (Single `→`, Double `↔`, or Start `←`), head size in `mm`, and `Shift` / `Precision Mode` `1 mm` start & length + angle-constrained drawing/endpoint adjustment.
   - **Dimension Lines**: Architectural dimension lines with witness ticks, live physical document length readouts in `mm` (or custom label overrides), and `Shift` / `Precision Mode` `1 mm` start & length + angle-constrained drawing/endpoint adjustment.
-- **Geometric Shapes & Translucent Highlights**: Rectangles, squares, ellipses, circles, triangles, and 1-click translucent highlighter overlays (Yellow, Green, Cyan, Pink).
+- **Geometric Shapes & Rectangular Area Highlights**: Rectangles, squares, ellipses, circles, triangles, and rectangular translucent Area Highlight boxes (Yellow, Green, Cyan, Pink).
 
 ### 4. Multi-Selection, Object Grouping, Alignment & Z-Order
 - **Multi-Object Selection (`Ctrl + Click` / `⌘ + Click`)**: Hold **Ctrl** (Windows/Linux) or **Command `⌘`** (Mac)—or **Shift**—while clicking objects on the canvas to add or toggle multiple objects in the selection, or use the multi-select checklist in the Properties Panel.

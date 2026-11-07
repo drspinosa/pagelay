@@ -16,9 +16,11 @@ import {
   ImageAsset,
   PageData,
   PageLayDocument,
+  PageObject,
   PaperFormat,
   Orientation,
 } from '../model/documentTypes';
+import { syncFreehandBoundingBox } from '../utils/units';
 
 interface SerializedAssetMeta {
   id: string;
@@ -499,6 +501,75 @@ export async function openDocumentWithNativePicker(): Promise<OpenLayPickerResul
   };
 }
 
+function sanitizeLoadedPageObjects(objects: PageObject[]): PageObject[] {
+  if (!Array.isArray(objects)) return [];
+  const sanitized: PageObject[] = [];
+
+  for (const obj of objects) {
+    if (!obj || typeof obj !== 'object') continue;
+
+    if (obj.type === 'group') {
+      sanitized.push({
+        ...obj,
+        children: sanitizeLoadedPageObjects(obj.children || []),
+      });
+      continue;
+    }
+
+    if (obj.type === 'freehand') {
+      const rawPoints = Array.isArray(obj.pointsMm) ? obj.pointsMm : [];
+      const validPoints = rawPoints
+        .filter(
+          (pt) =>
+            pt &&
+            typeof pt.xMm === 'number' &&
+            Number.isFinite(pt.xMm) &&
+            typeof pt.yMm === 'number' &&
+            Number.isFinite(pt.yMm)
+        )
+        .map((pt) => ({ xMm: pt.xMm, yMm: pt.yMm }));
+
+      if (validPoints.length === 0) continue;
+
+      const strokeTool = obj.strokeTool === 'highlighter' ? 'highlighter' : 'pen';
+      const defaultWidth = strokeTool === 'highlighter' ? 6 : 0.8;
+      const defaultOpacity = strokeTool === 'highlighter' ? 0.38 : 1;
+
+      sanitized.push(
+        syncFreehandBoundingBox({
+          ...obj,
+          type: 'freehand',
+          strokeTool,
+          pointsMm: validPoints,
+          strokeColor:
+            typeof obj.strokeColor === 'string' && obj.strokeColor.trim()
+              ? obj.strokeColor
+              : strokeTool === 'highlighter'
+              ? '#FACC15'
+              : '#0F172A',
+          strokeWidthMm:
+            typeof obj.strokeWidthMm === 'number' && Number.isFinite(obj.strokeWidthMm)
+              ? Math.max(0.2, obj.strokeWidthMm)
+              : defaultWidth,
+          opacity:
+            typeof obj.opacity === 'number' && Number.isFinite(obj.opacity)
+              ? Math.max(0.05, Math.min(1, obj.opacity))
+              : defaultOpacity,
+          rotationDeg:
+            typeof obj.rotationDeg === 'number' && Number.isFinite(obj.rotationDeg)
+              ? obj.rotationDeg
+              : 0,
+        })
+      );
+      continue;
+    }
+
+    sanitized.push(obj);
+  }
+
+  return sanitized;
+}
+
 /**
  * Reads and validates a `.lay` file from a browser File or Blob,
  * restoring all original image bytes and editable objects.
@@ -570,6 +641,14 @@ export async function loadDocumentFromLayFile(
   const manifestName = manifest.name ? normalizeDocumentName(manifest.name) : '';
   const resolvedDocName = fileBaseName || manifestName || 'Untitled Document';
 
+  const normalizedPages: PageData[] = manifest.pages.map((p, index) => ({
+    ...p,
+    id: p.id || `page_${index + 1}`,
+    name: p.name || `Page ${index + 1}`,
+    guidelines: Array.isArray(p.guidelines) ? p.guidelines : [],
+    objects: sanitizeLoadedPageObjects(p.objects || []),
+  }));
+
   return {
     id: manifest.id || `doc_${Date.now()}`,
     name: resolvedDocName,
@@ -591,7 +670,7 @@ export async function loadDocumentFromLayFile(
         ? Math.max(1, Math.min(45, Math.round(manifest.angleSnapIncrementDeg)))
         : 15,
     precisionMode: manifest.precisionMode ?? false,
-    pages: manifest.pages,
+    pages: normalizedPages,
     assets: assetsRecord,
   };
 }

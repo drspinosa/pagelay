@@ -13,6 +13,7 @@ import {
   ArrowObject,
   AVAILABLE_FONTS,
   DimensionObject,
+  FreehandStrokeObject,
   ImageObject,
   LineObject,
   PageData,
@@ -139,6 +140,8 @@ export async function renderPageToImageBlob(
       renderArrowOnCanvas(ctx, obj, pxPerMm);
     } else if (obj.type === 'dimension') {
       renderDimensionOnCanvas(ctx, obj, pxPerMm);
+    } else if (obj.type === 'freehand') {
+      renderFreehandOnCanvas(ctx, obj, pxPerMm);
     } else {
       renderShapeOnCanvas(ctx, obj, pxPerMm);
     }
@@ -376,6 +379,51 @@ function renderDimensionOnCanvas(
   ctx.textBaseline = 'bottom';
   ctx.fillText(labelText, 0, -padY - strokePx);
   ctx.restore();
+}
+
+function renderFreehandOnCanvas(
+  ctx: CanvasRenderingContext2D,
+  obj: FreehandStrokeObject,
+  pxPerMm: number
+) {
+  const pts = obj.pointsMm || [];
+  if (pts.length === 0) return;
+
+  const cx = (obj.xMm + obj.widthMm / 2) * pxPerMm;
+  const cy = (obj.yMm + obj.heightMm / 2) * pxPerMm;
+
+  ctx.translate(cx, cy);
+  ctx.rotate((obj.rotationDeg * Math.PI) / 180);
+
+  const localPts = pts.map((pt) => ({
+    x: (pt.xMm - (obj.xMm + obj.widthMm / 2)) * pxPerMm,
+    y: (pt.yMm - (obj.yMm + obj.heightMm / 2)) * pxPerMm,
+  }));
+
+  ctx.strokeStyle = obj.strokeColor || '#0F172A';
+  ctx.lineWidth = Math.max(1, obj.strokeWidthMm * pxPerMm);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.moveTo(localPts[0].x, localPts[0].y);
+
+  if (localPts.length === 1) {
+    ctx.lineTo(localPts[0].x + 0.01, localPts[0].y);
+  } else if (localPts.length === 2) {
+    ctx.lineTo(localPts[1].x, localPts[1].y);
+  } else {
+    for (let i = 1; i < localPts.length - 1; i++) {
+      const midX = (localPts[i].x + localPts[i + 1].x) / 2;
+      const midY = (localPts[i].y + localPts[i + 1].y) / 2;
+      ctx.quadraticCurveTo(localPts[i].x, localPts[i].y, midX, midY);
+    }
+    const last = localPts[localPts.length - 1];
+    ctx.lineTo(last.x, last.y);
+  }
+
+  ctx.stroke();
 }
 
 function renderShapeOnCanvas(ctx: CanvasRenderingContext2D, obj: ShapeObject, pxPerMm: number) {

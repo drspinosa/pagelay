@@ -17,6 +17,8 @@ import {
   ArrowObject,
   DimensionObject,
   GroupObject,
+  FreehandStrokeObject,
+  FreehandPointMm,
   Orientation,
   PageObject,
   PaperFormat,
@@ -184,6 +186,200 @@ export function syncLinearBoundingBox<T extends LineObject | ArrowObject | Dimen
 }
 
 /**
+ * Synchronizes the bounding box (xMm, yMm, widthMm, heightMm) of a FreehandStrokeObject
+ * from its `pointsMm` array. Ensures a minimum 1 mm bounding box for single-dot or collinear strokes.
+ */
+export function syncFreehandBoundingBox(stroke: FreehandStrokeObject): FreehandStrokeObject {
+  if (!stroke.pointsMm || stroke.pointsMm.length === 0) {
+    return {
+      ...stroke,
+      pointsMm: [{ xMm: stroke.xMm, yMm: stroke.yMm }],
+      widthMm: Math.max(1, stroke.widthMm || 1),
+      heightMm: Math.max(1, stroke.heightMm || 1),
+    };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const pt of stroke.pointsMm) {
+    if (pt.xMm < minX) minX = pt.xMm;
+    if (pt.yMm < minY) minY = pt.yMm;
+    if (pt.xMm > maxX) maxX = pt.xMm;
+    if (pt.yMm > maxY) maxY = pt.yMm;
+  }
+  const pad = Math.max(0.2, (stroke.strokeWidthMm || 0.8) * 0.25);
+  const spanW = maxX - minX;
+  const spanH = maxY - minY;
+  const xMm = spanW < 0.5 ? minX - pad : minX;
+  const yMm = spanH < 0.5 ? minY - pad : minY;
+  const widthMm = Math.max(1, spanW < 0.5 ? spanW + pad * 2 : spanW);
+  const heightMm = Math.max(1, spanH < 0.5 ? spanH + pad * 2 : spanH);
+  return {
+    ...stroke,
+    xMm: formatMm(xMm, 2),
+    yMm: formatMm(yMm, 2),
+    widthMm: formatMm(widthMm, 2),
+    heightMm: formatMm(heightMm, 2),
+  };
+}
+
+/**
+ * Proportionally scales all vertices of a FreehandStrokeObject into a new bounding box.
+ */
+export function resizeFreehandStrokeMm(
+  stroke: FreehandStrokeObject,
+  newXMm: number,
+  newYMm: number,
+  newWidthMm: number,
+  newHeightMm: number
+): FreehandStrokeObject {
+  const safeNewW = Math.max(1, newWidthMm);
+  const safeNewH = Math.max(1, newHeightMm);
+  if (!stroke.pointsMm || stroke.pointsMm.length === 0) {
+    return {
+      ...stroke,
+      xMm: formatMm(newXMm, 2),
+      yMm: formatMm(newYMm, 2),
+      widthMm: formatMm(safeNewW, 2),
+      heightMm: formatMm(safeNewH, 2),
+    };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const pt of stroke.pointsMm) {
+    if (pt.xMm < minX) minX = pt.xMm;
+    if (pt.yMm < minY) minY = pt.yMm;
+    if (pt.xMm > maxX) maxX = pt.xMm;
+    if (pt.yMm > maxY) maxY = pt.yMm;
+  }
+  const oldSpanX = maxX - minX;
+  const oldSpanY = maxY - minY;
+  const newPoints: FreehandPointMm[] = stroke.pointsMm.map((pt) => {
+    const normX = oldSpanX > 0.001 ? (pt.xMm - minX) / oldSpanX : 0.5;
+    const normY = oldSpanY > 0.001 ? (pt.yMm - minY) / oldSpanY : 0.5;
+    return {
+      xMm: formatMm(newXMm + normX * safeNewW, 2),
+      yMm: formatMm(newYMm + normY * safeNewH, 2),
+    };
+  });
+  return {
+    ...stroke,
+    xMm: formatMm(newXMm, 2),
+    yMm: formatMm(newYMm, 2),
+    widthMm: formatMm(safeNewW, 2),
+    heightMm: formatMm(safeNewH, 2),
+    pointsMm: newPoints,
+  };
+}
+
+/**
+ * Builds a smooth SVG path data string ("M ... Q ... L ...") from a list of 2D coordinates.
+ * Uses quadratic Bézier midpoint interpolation so freehand Pen and Highlighter strokes
+ * look naturally smooth with round caps and joins while staying faithful to the user's path.
+ */
+export function buildSmoothFreehandSvgPath(points: ReadonlyArray<{ x: number; y: number }>): string {
+  if (points.length === 0) return '';
+  if (points.length === 1) {
+    const p = points[0];
+    return `M ${p.x.toFixed(2)} ${p.y.toFixed(2)} L ${(p.x + 0.01).toFixed(2)} ${p.y.toFixed(2)}`;
+  }
+  if (points.length === 2) {
+    const [p0, p1] = points;
+    return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} L ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
+  }
+  let d = `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const curr = points[i];
+    const next = points[i + 1];
+    const midX = (curr.x + next.x) / 2;
+    const midY = (curr.y + next.y) / 2;
+    d += ` Q ${curr.x.toFixed(2)} ${curr.y.toFixed(2)} ${midX.toFixed(2)} ${midY.toFixed(2)}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L ${last.x.toFixed(2)} ${last.y.toFixed(2)}`;
+  return d;
+}
+
+/**
+ * Computes the shortest distance in millimetres from a point (px, py) to a line segment (ax, ay)-(bx, by).
+ */
+export function pointToSegmentDistanceMm(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-8) {
+    return Math.hypot(px - ax, py - ay);
+  }
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  const projX = ax + t * dx;
+  const projY = ay + t * dy;
+  return Math.hypot(px - projX, py - projY);
+}
+
+/**
+ * Tests whether a point in canonical page millimetres (ptXMm, ptYMm) hits a FreehandStrokeObject
+ * within a given extra tolerance in millimetres. Accounts for object rotation around its bounding center.
+ */
+export function isPointNearFreehandStrokeMm(
+  ptXMm: number,
+  ptYMm: number,
+  stroke: FreehandStrokeObject,
+  extraToleranceMm = 2.0
+): boolean {
+  if (!stroke.pointsMm || stroke.pointsMm.length === 0) return false;
+
+  let localX = ptXMm;
+  let localY = ptYMm;
+  const rotDeg = stroke.rotationDeg || 0;
+  if (Math.abs(rotDeg) > 0.001) {
+    const cx = stroke.xMm + stroke.widthMm / 2;
+    const cy = stroke.yMm + stroke.heightMm / 2;
+    const rad = (-rotDeg * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const dx = ptXMm - cx;
+    const dy = ptYMm - cy;
+    localX = cx + dx * cos - dy * sin;
+    localY = cy + dx * sin + dy * cos;
+  }
+
+  const thresholdMm = (stroke.strokeWidthMm || 0.8) / 2 + extraToleranceMm;
+
+  if (
+    localX < stroke.xMm - thresholdMm - 2 ||
+    localX > stroke.xMm + stroke.widthMm + thresholdMm + 2 ||
+    localY < stroke.yMm - thresholdMm - 2 ||
+    localY > stroke.yMm + stroke.heightMm + thresholdMm + 2
+  ) {
+    return false;
+  }
+
+  if (stroke.pointsMm.length === 1) {
+    const p = stroke.pointsMm[0];
+    return Math.hypot(localX - p.xMm, localY - p.yMm) <= thresholdMm;
+  }
+
+  for (let i = 0; i < stroke.pointsMm.length - 1; i++) {
+    const a = stroke.pointsMm[i];
+    const b = stroke.pointsMm[i + 1];
+    if (pointToSegmentDistanceMm(localX, localY, a.xMm, a.yMm, b.xMm, b.yMm) <= thresholdMm) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Calculates the physical Euclidean distance in mm between two endpoints.
  */
 export function getLineLengthMm(x1Mm: number, y1Mm: number, x2Mm: number, y2Mm: number): number {
@@ -270,8 +466,8 @@ export function getCombinedBoundsMm(objects: PageObject[]): {
 }
 
 /**
- * Synchronously translates any PageObject (including linear objects and GroupObjects
- * with all their nested children) by (dxMm, dyMm) in canonical millimetres.
+ * Synchronously translates any PageObject (including linear objects, FreehandStrokeObjects,
+ * and GroupObjects with all their nested children) by (dxMm, dyMm) in canonical millimetres.
  */
 export function translatePageObjectMm<T extends PageObject>(
   obj: T,
@@ -286,6 +482,18 @@ export function translatePageObjectMm<T extends PageObject>(
       x2Mm: formatMm(obj.x2Mm + dxMm, 2),
       y2Mm: formatMm(obj.y2Mm + dyMm, 2),
     }) as T;
+  }
+
+  if (obj.type === 'freehand') {
+    return {
+      ...obj,
+      xMm: formatMm(obj.xMm + dxMm, 2),
+      yMm: formatMm(obj.yMm + dyMm, 2),
+      pointsMm: obj.pointsMm.map((pt) => ({
+        xMm: formatMm(pt.xMm + dxMm, 2),
+        yMm: formatMm(pt.yMm + dyMm, 2),
+      })),
+    } as T;
   }
 
   if (obj.type === 'group') {
@@ -336,6 +544,24 @@ function scaleChildInGroupMm(
       x2Mm: formatMm(nx2, 2),
       y2Mm: formatMm(ny2, 2),
     });
+  }
+
+  if (child.type === 'freehand') {
+    const nextChildX = formatMm(newX + (child.xMm - oldX) * scaleX, 2);
+    const nextChildY = formatMm(newY + (child.yMm - oldY) * scaleY, 2);
+    const nextChildW = formatMm(Math.max(1, child.widthMm * scaleX), 2);
+    const nextChildH = formatMm(Math.max(1, child.heightMm * scaleY), 2);
+    return {
+      ...child,
+      xMm: nextChildX,
+      yMm: nextChildY,
+      widthMm: nextChildW,
+      heightMm: nextChildH,
+      pointsMm: child.pointsMm.map((pt) => ({
+        xMm: formatMm(newX + (pt.xMm - oldX) * scaleX, 2),
+        yMm: formatMm(newY + (pt.yMm - oldY) * scaleY, 2),
+      })),
+    };
   }
 
   const nextChildX = formatMm(newX + (child.xMm - oldX) * scaleX, 2);
@@ -442,6 +668,21 @@ function rotateChildAroundCenterMm(
   const rotatedCenter = rotatePointAroundCenter(childCx, childCy, groupCx, groupCy, rad);
   const nextRot = (((child.rotationDeg + deltaDeg) % 360) + 360) % 360;
 
+  if (child.type === 'freehand') {
+    const dx = rotatedCenter.x - childCx;
+    const dy = rotatedCenter.y - childCy;
+    return {
+      ...child,
+      xMm: formatMm(child.xMm + dx, 2),
+      yMm: formatMm(child.yMm + dy, 2),
+      rotationDeg: Math.round(nextRot),
+      pointsMm: child.pointsMm.map((pt) => ({
+        xMm: formatMm(pt.xMm + dx, 2),
+        yMm: formatMm(pt.yMm + dy, 2),
+      })),
+    };
+  }
+
   if (child.type === 'group') {
     const dx = rotatedCenter.x - childCx;
     const dy = rotatedCenter.y - childCy;
@@ -513,4 +754,5 @@ export function flattenPageObjects(
   }
   return result;
 }
+
 

@@ -34,6 +34,8 @@ import {
   ArrowObject,
   AVAILABLE_FONTS,
   DimensionObject,
+  FreehandPointMm,
+  FreehandStrokeObject,
   GroupObject,
   Guideline,
   HIGHLIGHT_PRESETS,
@@ -48,14 +50,18 @@ import {
 } from '../model/documentTypes';
 import { generateId } from '../model/documentFactory';
 import {
+  buildSmoothFreehandSvgPath,
   CSS_PX_PER_MM_AT_100,
   formatMm,
   getCombinedBoundsMm,
   getLineLengthMm,
   getObjectBoundsMm,
+  isPointNearFreehandStrokeMm,
   ptToMm,
+  resizeFreehandStrokeMm,
   resizeGroupObjectMm,
   rotateGroupObjectMm,
+  syncFreehandBoundingBox,
   syncLinearBoundingBox,
   translatePageObjectMm,
 } from '../utils/units';
@@ -69,6 +75,10 @@ interface EditorCanvasProps {
   panY: number;
   activeTool: ToolType;
   activeHighlightColor: string;
+  penColor: string;
+  penWidthMm: number;
+  freehandHighlighterColor: string;
+  freehandHighlighterWidthMm: number;
   selectedObjectId: string | null;
   selectedObjectIds: string[];
   selectedGuideId: string | null;
@@ -84,7 +94,8 @@ interface EditorCanvasProps {
   onFitToPage: () => void;
   cursorMm: { x: number; y: number } | null;
   onCursorMoveMm: (pos: { x: number; y: number } | null) => void;
-  onAddObject: (obj: PageObject, enterEditText?: boolean) => void;
+  onAddObject: (obj: PageObject, enterEditText?: boolean, selectNewObject?: boolean) => void;
+  onDeleteObject: (id: string) => void;
   onUpdateObject: (obj: PageObject, commitHistory: boolean) => void;
   onUpdateMultipleObjects: (objects: PageObject[], commitHistory: boolean) => void;
   onRecordHistorySnapshot: () => void;
@@ -177,7 +188,10 @@ type InteractionState =
     }
   | {
       mode: 'creating-object';
-      tool: Exclude<ToolType, 'select' | 'pan'>;
+      tool: Exclude<
+        ToolType,
+        'select' | 'pan' | 'pen' | 'freehand-highlighter' | 'eraser'
+      >;
       rawStartMmX: number;
       rawStartMmY: number;
       startMmX: number;
@@ -186,6 +200,17 @@ type InteractionState =
       currentMmY: number;
       constrainedLengthMm: number;
       constrainedAngleDeg: number;
+    }
+  | {
+      mode: 'drawing-freehand';
+      strokeTool: 'pen' | 'highlighter';
+      pointsMm: FreehandPointMm[];
+      strokeColor: string;
+      strokeWidthMm: number;
+      opacity: number;
+    }
+  | {
+      mode: 'erasing-freehand';
     };
 
 export const EditorCanvas: React.FC<EditorCanvasProps> = ({
@@ -196,6 +221,10 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   panY,
   activeTool,
   activeHighlightColor,
+  penColor,
+  penWidthMm,
+  freehandHighlighterColor,
+  freehandHighlighterWidthMm,
   selectedObjectId,
   selectedObjectIds,
   selectedGuideId,
@@ -212,6 +241,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   cursorMm,
   onCursorMoveMm,
   onAddObject,
+  onDeleteObject,
   onUpdateObject,
   onUpdateMultipleObjects,
   onRecordHistorySnapshot,
@@ -621,6 +651,25 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   };
 
   /**
+   * Finds the top-most unlocked FreehandStrokeObject (`type === 'freehand'`) near `(ptXMm, ptYMm)`
+   * and deletes it as a single undoable operation.
+   * Strictly ignores all non-freehand objects (images, text, lines, arrows, dimensions, shapes, rectangular area highlights).
+   */
+  const eraseFreehandStrokeAtMm = (ptXMm: number, ptYMm: number): boolean => {
+    const extraToleranceMm = Math.max(1.5, 8 / screenPxPerMm);
+    const objects = page.objects;
+    for (let i = objects.length - 1; i >= 0; i--) {
+      const obj = objects[i];
+      if (obj.type !== 'freehand' || obj.locked) continue;
+      if (isPointNearFreehandStrokeMm(ptXMm, ptYMm, obj, extraToleranceMm)) {
+        onDeleteObject(obj.id);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /**
    * Unified pointer/touch start logic on workspace background.
    */
   const startWorkspaceInteraction = (
@@ -650,8 +699,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       onSetCroppingImageId(null);
     }
 
-    // In Select or Pan mode, dragging on empty workspace slides/pans the canvas smoothly!
-    // If the user just taps without dragging in Select mode (and is not holding Ctrl/Cmd/Shift), we clear the selection on release.
+    // Middle-click or Spacebar always pans the canvas
     if (isMiddleClick || isSpacePressed || activeTool === 'pan' || activeTool === 'select') {
       setInteraction({
         mode: 'panning',
@@ -670,6 +718,28 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     }
 
     const ptMm = clientToPageMm(clientX, clientY);
+
+    // Freehand Pen & Freehand Highlighter: no magnetic snapping, angle snapping, or Precision Mode constraint
+    if (activeTool === 'pen' || activeTool === 'freehand-highlighter') {
+      const isHighlighter = activeTool === 'freehand-highlighter';
+      setInteraction({
+        mode: 'drawing-freehand',
+        strokeTool: isHighlighter ? 'highlighter' : 'pen',
+        pointsMm: [{ xMm: formatMm(ptMm.x, 2), yMm: formatMm(ptMm.y, 2) }],
+        strokeColor: isHighlighter ? freehandHighlighterColor : penColor,
+        strokeWidthMm: isHighlighter ? freehandHighlighterWidthMm : penWidthMm,
+        opacity: isHighlighter ? 0.38 : 1,
+      });
+      return;
+    }
+
+    // Basic Eraser: erases only freehand Pen / Highlighter strokes on click/tap or drag
+    if (activeTool === 'eraser') {
+      eraseFreehandStrokeAtMm(ptMm.x, ptMm.y);
+      setInteraction({ mode: 'erasing-freehand' });
+      return;
+    }
+
     const snappedX = snapCoordinateMm(ptMm.x, 'x').snappedMm;
     const snappedY = snapCoordinateMm(ptMm.y, 'y').snappedMm;
 
@@ -1177,7 +1247,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           y2Mm: formatMm(init.y2Mm + actualDy, 2),
         });
         onUpdateObject(nextObj, false);
-      } else if (init.type === 'group') {
+      } else if (init.type === 'group' || init.type === 'freehand') {
         const snapped = snapBoxPositionMm(
           init.xMm + dxMm,
           init.yMm + dyMm,
@@ -1411,6 +1481,17 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           ),
           false
         );
+      } else if (init.type === 'freehand') {
+        onUpdateObject(
+          resizeFreehandStrokeMm(
+            init,
+            formatMm(newX, 2),
+            formatMm(newY, 2),
+            formatMm(newW, 2),
+            formatMm(newH, 2)
+          ),
+          false
+        );
       } else {
         onUpdateObject(
           {
@@ -1557,6 +1638,27 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
         constrainedLengthMm: freeLengthMm,
         constrainedAngleDeg: freeAngleDeg,
       });
+      return;
+    }
+
+    if (currentInteraction.mode === 'drawing-freehand') {
+      const pts = currentInteraction.pointsMm;
+      const lastPt = pts[pts.length - 1];
+      const nextX = formatMm(ptMm.x, 2);
+      const nextY = formatMm(ptMm.y, 2);
+      const minStepMm = Math.min(0.4, 1.5 / Math.max(0.05, screenPxPerMm));
+      if (!lastPt || Math.hypot(nextX - lastPt.xMm, nextY - lastPt.yMm) >= minStepMm) {
+        setInteraction({
+          ...currentInteraction,
+          pointsMm: [...pts, { xMm: nextX, yMm: nextY }],
+        });
+      }
+      return;
+    }
+
+    if (currentInteraction.mode === 'erasing-freehand') {
+      eraseFreehandStrokeAtMm(ptMm.x, ptMm.y);
+      return;
     }
   };
   processPointerMoveRef.current = processPointerMove;
@@ -1669,6 +1771,33 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     }
   };
 
+  /**
+   * Cancels an interrupted pointer or touch sequence cleanly without committing an incomplete freehand stroke.
+   */
+  const handleWorkspacePointerCancel = (e: React.PointerEvent) => {
+    activePointersRef.current.delete(e.pointerId);
+    try {
+      if (workspaceRef.current?.hasPointerCapture(e.pointerId)) {
+        workspaceRef.current.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Ignore release errors
+    }
+    if (activePointersRef.current.size < 2) {
+      isTouchPinchingRef.current = false;
+    }
+    if (
+      interactionRef.current?.mode === 'drawing-freehand' ||
+      interactionRef.current?.mode === 'erasing-freehand'
+    ) {
+      setInteraction(null);
+      return;
+    }
+    if (activePointersRef.current.size === 0 && !isTouchPinchingRef.current) {
+      finishWorkspaceInteraction();
+    }
+  };
+
   const handleWorkspaceMouseMove = (e: React.MouseEvent) => {
     processPointerMove(e.clientX, e.clientY, e.shiftKey);
   };
@@ -1723,6 +1852,84 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       activePointersRef.current.clear();
       finishWorkspaceInteraction();
     }
+  };
+
+  const handleWorkspaceTouchCancel = () => {
+    isTouchPinchingRef.current = false;
+    isAdjustingGuideOrRulerRef.current = false;
+    activePointersRef.current.clear();
+    if (
+      interactionRef.current?.mode === 'drawing-freehand' ||
+      interactionRef.current?.mode === 'erasing-freehand'
+    ) {
+      setInteraction(null);
+      return;
+    }
+    finishWorkspaceInteraction();
+  };
+
+  /**
+   * Computes canonical millimetre bounding box (xMm, yMm, widthMm, heightMm) for box-based
+   * creation tools (`rectangle`, `square`, `ellipse`, `circle`, `triangle`, `highlight`, `text`).
+   * Shared between the live WYSIWYG drag preview and final object creation on pointer release
+   * so the previewed shape and created object have identical position and dimensions in all 4 drag quadrants.
+   */
+  const computeBoxCreationGeometryMm = (
+    tool: Exclude<
+      ToolType,
+      'select' | 'pan' | 'pen' | 'freehand-highlighter' | 'eraser'
+    >,
+    startMmX: number,
+    startMmY: number,
+    currentMmX: number,
+    currentMmY: number,
+    applyClickDefault = false
+  ): { xMm: number; yMm: number; widthMm: number; heightMm: number } => {
+    const sheetScale = Math.max(0.35, doc.widthMm / 1189);
+    const draggedW = Math.abs(currentMmX - startMmX);
+    const draggedH = Math.abs(currentMmY - startMmY);
+    const isTinyClick = draggedW < 5 && draggedH < 5;
+
+    if (applyClickDefault && isTinyClick) {
+      if (tool === 'text') {
+        return {
+          xMm: formatMm(Math.min(startMmX, currentMmX), 1),
+          yMm: formatMm(Math.min(startMmY, currentMmY), 1),
+          widthMm: formatMm(Math.round(180 * sheetScale), 1),
+          heightMm: formatMm(Math.round(42 * sheetScale), 1),
+        };
+      }
+      const defaultW = Math.round(120 * sheetScale);
+      const defaultH =
+        tool === 'square' || tool === 'circle'
+          ? defaultW
+          : Math.round(80 * sheetScale);
+      return {
+        xMm: formatMm(Math.min(startMmX, currentMmX), 1),
+        yMm: formatMm(Math.min(startMmY, currentMmY), 1),
+        widthMm: formatMm(defaultW, 1),
+        heightMm: formatMm(defaultH, 1),
+      };
+    }
+
+    if (tool === 'square' || tool === 'circle') {
+      const sideMm = Math.max(draggedW, draggedH);
+      const xMm = currentMmX < startMmX ? startMmX - sideMm : startMmX;
+      const yMm = currentMmY < startMmY ? startMmY - sideMm : startMmY;
+      return {
+        xMm: formatMm(xMm, 1),
+        yMm: formatMm(yMm, 1),
+        widthMm: formatMm(sideMm, 1),
+        heightMm: formatMm(sideMm, 1),
+      };
+    }
+
+    return {
+      xMm: formatMm(Math.min(startMmX, currentMmX), 1),
+      yMm: formatMm(Math.min(startMmY, currentMmY), 1),
+      widthMm: formatMm(draggedW, 1),
+      heightMm: formatMm(draggedH, 1),
+    };
   };
 
   /**
@@ -1787,11 +1994,51 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       currentInteraction.mode === 'resizing-object' ||
       currentInteraction.mode === 'rotating-object' ||
       currentInteraction.mode === 'dragging-endpoint' ||
-      currentInteraction.mode === 'cropping-image'
+      currentInteraction.mode === 'cropping-image' ||
+      currentInteraction.mode === 'erasing-freehand'
     ) {
       // Pre-drag history snapshot was already recorded on the first move frame via recordDragHistoryOnce()
       // and live coordinates were committed during processPointerMove.
       setInteraction(null);
+      return;
+    }
+
+    if (currentInteraction.mode === 'drawing-freehand') {
+      const { strokeTool, pointsMm, strokeColor, strokeWidthMm, opacity } =
+        currentInteraction;
+      setInteraction(null);
+
+      if (pointsMm.length === 0) return;
+
+      const normalizedPoints =
+        pointsMm.length === 1
+          ? [
+              pointsMm[0],
+              {
+                xMm: formatMm(pointsMm[0].xMm + 0.1, 2),
+                yMm: pointsMm[0].yMm,
+              },
+            ]
+          : pointsMm;
+
+      const strokeObj: FreehandStrokeObject = syncFreehandBoundingBox({
+        id: generateId(strokeTool === 'highlighter' ? 'highlighter' : 'pen'),
+        type: 'freehand',
+        strokeTool,
+        name: strokeTool === 'highlighter' ? 'Highlighter Stroke' : 'Pen Stroke',
+        xMm: 0,
+        yMm: 0,
+        widthMm: 1,
+        heightMm: 1,
+        rotationDeg: 0,
+        opacity,
+        strokeColor,
+        strokeWidthMm,
+        pointsMm: normalizedPoints,
+      });
+
+      // Keep the Pen or Freehand Highlighter tool active and do not clutter with selection handles while drawing
+      onAddObject(strokeObj, false, false);
       return;
     }
 
@@ -1884,22 +2131,24 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
         return;
       }
 
-      const minX = Math.min(startMmX, currentMmX);
-      const minY = Math.min(startMmY, currentMmY);
-      const draggedW = Math.abs(currentMmX - startMmX);
-      const draggedH = Math.abs(currentMmY - startMmY);
+      const box = computeBoxCreationGeometryMm(
+        tool,
+        startMmX,
+        startMmY,
+        currentMmX,
+        currentMmY,
+        true
+      );
 
       if (tool === 'text') {
-        const wMm = draggedW < 5 ? Math.round(180 * sheetScale) : draggedW;
-        const hMm = draggedH < 5 ? Math.round(42 * sheetScale) : draggedH;
         const textObj: TextObject = {
           id: generateId('text'),
           type: 'text',
           name: 'Text Box',
-          xMm: formatMm(minX, 1),
-          yMm: formatMm(minY, 1),
-          widthMm: formatMm(wMm, 1),
-          heightMm: formatMm(hMm, 1),
+          xMm: box.xMm,
+          yMm: box.yMm,
+          widthMm: box.widthMm,
+          heightMm: box.heightMm,
           rotationDeg: 0,
           opacity: 1,
           text: 'POWER',
@@ -1920,24 +2169,16 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
         return;
       }
 
-      let wMm = draggedW < 5 ? Math.round(120 * sheetScale) : draggedW;
-      let hMm = draggedH < 5 ? Math.round(80 * sheetScale) : draggedH;
-      if (tool === 'square' || tool === 'circle') {
-        const side = Math.max(wMm, hMm);
-        wMm = side;
-        hMm = side;
-      }
-
       if (tool === 'highlight') {
         const preset = HIGHLIGHT_PRESETS.find((p) => p.color === activeHighlightColor);
         const hlObj: ShapeObject = {
           id: generateId('highlight'),
           type: 'highlight',
           name: 'Highlight',
-          xMm: formatMm(minX, 1),
-          yMm: formatMm(minY, 1),
-          widthMm: formatMm(wMm, 1),
-          heightMm: formatMm(hMm, 1),
+          xMm: box.xMm,
+          yMm: box.yMm,
+          widthMm: box.widthMm,
+          heightMm: box.heightMm,
           rotationDeg: 0,
           opacity: preset ? preset.opacity : 0.35,
           fillColor: activeHighlightColor || '#FACC15',
@@ -1951,10 +2192,10 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           id: generateId(tool),
           type: tool,
           name: tool.charAt(0).toUpperCase() + tool.slice(1),
-          xMm: formatMm(minX, 1),
-          yMm: formatMm(minY, 1),
-          widthMm: formatMm(wMm, 1),
-          heightMm: formatMm(hMm, 1),
+          xMm: box.xMm,
+          yMm: box.yMm,
+          widthMm: box.widthMm,
+          heightMm: box.heightMm,
           rotationDeg: 0,
           opacity: 1,
           fillColor: '#E0F2FE',
@@ -2687,6 +2928,270 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       );
     }
 
+    // Freehand Pen & Highlighter Stroke Objects
+    if (obj.type === 'freehand') {
+      const leftPx = obj.xMm * basePxPerMm;
+      const topPx = obj.yMm * basePxPerMm;
+      const widthPx = obj.widthMm * basePxPerMm;
+      const heightPx = obj.heightMm * basePxPerMm;
+      const strokePx = Math.max(1.2, obj.strokeWidthMm * basePxPerMm);
+
+      const localPts = (obj.pointsMm || []).map((pt) => ({
+        x: (pt.xMm - obj.xMm) * basePxPerMm,
+        y: (pt.yMm - obj.yMm) * basePxPerMm,
+      }));
+      if (localPts.length === 1) {
+        localPts.push({ x: localPts[0].x + 0.2, y: localPts[0].y });
+      }
+      const svgPathD = buildSmoothFreehandSvgPath(localPts);
+      const hitStrokeWidthPx = Math.max(18 * invZoom, strokePx + 12 * invZoom);
+
+      return (
+        <div
+          key={obj.id}
+          onContextMenu={(e) => {
+            if (e.ctrlKey || e.metaKey) {
+              e.preventDefault();
+            }
+          }}
+          className="absolute select-none pointer-events-none"
+          style={{
+            left: leftPx,
+            top: topPx,
+            width: widthPx,
+            height: heightPx,
+            transform: `rotate(${obj.rotationDeg}deg)`,
+            transformOrigin: 'center center',
+          }}
+        >
+          <svg
+            className="w-full h-full overflow-visible pointer-events-none"
+            style={{ opacity: obj.opacity }}
+          >
+            {/* Interactive Hit Path for Select & Eraser Tools (Only along the stroke path, never blocking unrelated area) */}
+            {!isInsideGroup && (activeTool === 'select' || activeTool === 'eraser') && (
+              <path
+                d={svgPathD}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={hitStrokeWidthPx}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={
+                  activeTool === 'eraser'
+                    ? 'pointer-events-auto cursor-pointer'
+                    : 'pointer-events-auto cursor-move'
+                }
+                onPointerDown={(e) => {
+                  const isMacCtrlClick =
+                    e.pointerType === 'mouse' && e.ctrlKey && e.button === 2;
+                  if (
+                    (e.pointerType === 'mouse' && e.button !== 0 && !isMacCtrlClick) ||
+                    (e.pointerType === 'touch' && !e.isPrimary) ||
+                    activePointersRef.current.size >= 2 ||
+                    isTouchPinchingRef.current
+                  ) {
+                    return;
+                  }
+                  if (activeTool === 'eraser') {
+                    e.stopPropagation();
+                    if (!obj.locked) {
+                      onDeleteObject(obj.id);
+                    }
+                    setInteraction({ mode: 'erasing-freehand' });
+                    return;
+                  }
+                  if (activeTool !== 'select') return;
+                  e.stopPropagation();
+                  lastObjectPointerDownTimeRef.current = performance.now();
+                  startObjectSelectionAndMove(
+                    e.clientX,
+                    e.clientY,
+                    e.ctrlKey || e.metaKey || e.shiftKey
+                  );
+                }}
+                onMouseDown={(e) => {
+                  const isMacCtrlClick = e.ctrlKey && e.button === 2;
+                  if (e.button !== 0 && !isMacCtrlClick) return;
+                  if (activeTool === 'eraser') {
+                    e.stopPropagation();
+                    if (interactionRef.current !== null) return;
+                    if (!obj.locked) {
+                      onDeleteObject(obj.id);
+                    }
+                    setInteraction({ mode: 'erasing-freehand' });
+                    return;
+                  }
+                  if (activeTool !== 'select') return;
+                  e.stopPropagation();
+                  if (
+                    interactionRef.current !== null ||
+                    performance.now() - lastObjectPointerDownTimeRef.current < 150
+                  ) {
+                    return;
+                  }
+                  startObjectSelectionAndMove(
+                    e.clientX,
+                    e.clientY,
+                    e.ctrlKey || e.metaKey || e.shiftKey
+                  );
+                }}
+                onTouchStart={(e) => {
+                  if (e.touches.length !== 1 || isTouchPinchingRef.current) return;
+                  if (activeTool === 'eraser') {
+                    e.stopPropagation();
+                    if (interactionRef.current !== null) return;
+                    if (!obj.locked) {
+                      onDeleteObject(obj.id);
+                    }
+                    setInteraction({ mode: 'erasing-freehand' });
+                    return;
+                  }
+                  if (activeTool !== 'select') return;
+                  e.stopPropagation();
+                  if (interactionRef.current !== null) return;
+                  startObjectSelectionAndMove(
+                    e.touches[0].clientX,
+                    e.touches[0].clientY,
+                    false
+                  );
+                }}
+              />
+            )}
+
+            {/* Visible Smooth Vector Freehand Path (Single path so semi-transparent highlighter never self-darkens) */}
+            <path
+              d={svgPathD}
+              fill="none"
+              stroke={obj.strokeColor || '#0F172A'}
+              strokeWidth={strokePx}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+
+          {/* Selection Frame, Rotation Handle & 8 Resize Handles */}
+          {isSelected && (
+            <div
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                outline: `${borderRingPagePx}px solid ${
+                  obj.locked ? '#F59E0B' : '#2563EB'
+                }`,
+              }}
+            >
+              {!obj.locked && (
+                <div
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    setInteraction({
+                      mode: 'rotating-object',
+                      objectId: obj.id,
+                      centerMmX: obj.xMm + obj.widthMm / 2,
+                      centerMmY: obj.yMm + obj.heightMm / 2,
+                      initialObject: obj,
+                    });
+                  }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    if (interactionRef.current !== null) return;
+                    setInteraction({
+                      mode: 'rotating-object',
+                      objectId: obj.id,
+                      centerMmX: obj.xMm + obj.widthMm / 2,
+                      centerMmY: obj.yMm + obj.heightMm / 2,
+                      initialObject: obj,
+                    });
+                  }}
+                  onTouchStart={(e) => {
+                    if (e.touches.length !== 1) return;
+                    e.stopPropagation();
+                    if (interactionRef.current !== null) return;
+                    setInteraction({
+                      mode: 'rotating-object',
+                      objectId: obj.id,
+                      centerMmX: obj.xMm + obj.widthMm / 2,
+                      centerMmY: obj.yMm + obj.heightMm / 2,
+                      initialObject: obj,
+                    });
+                  }}
+                  className="absolute left-1/2 bg-white rounded-full cursor-grab pointer-events-auto shadow-sm"
+                  style={{
+                    top: -24 * invZoom,
+                    marginLeft: -halfHandlePagePx,
+                    width: handleSizePagePx,
+                    height: handleSizePagePx,
+                    border: `${borderRingPagePx}px solid #2563EB`,
+                  }}
+                  title="Drag to rotate stroke"
+                />
+              )}
+
+              {!obj.locked &&
+                (
+                  [
+                    { id: 'nw', x: 0, y: 0, cursor: 'cursor-nwse-resize' },
+                    { id: 'n', x: 0.5, y: 0, cursor: 'cursor-ns-resize' },
+                    { id: 'ne', x: 1, y: 0, cursor: 'cursor-nesw-resize' },
+                    { id: 'e', x: 1, y: 0.5, cursor: 'cursor-ew-resize' },
+                    { id: 'se', x: 1, y: 1, cursor: 'cursor-nwse-resize' },
+                    { id: 's', x: 0.5, y: 1, cursor: 'cursor-ns-resize' },
+                    { id: 'sw', x: 0, y: 1, cursor: 'cursor-nesw-resize' },
+                    { id: 'w', x: 0, y: 0.5, cursor: 'cursor-ew-resize' },
+                  ] as const
+                ).map((h) => {
+                  const startStrokeResize = (clientX: number, clientY: number) => {
+                    const ptMm = clientToPageMm(clientX, clientY);
+                    setInteraction({
+                      mode: 'resizing-object',
+                      objectId: obj.id,
+                      handle: h.id,
+                      startMmX: ptMm.x,
+                      startMmY: ptMm.y,
+                      initialObject: obj,
+                    });
+                  };
+
+                  return (
+                    <div
+                      key={h.id}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        startStrokeResize(e.clientX, e.clientY);
+                      }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        if (interactionRef.current !== null) return;
+                        startStrokeResize(e.clientX, e.clientY);
+                      }}
+                      onTouchStart={(e) => {
+                        if (e.touches.length !== 1) return;
+                        e.stopPropagation();
+                        if (interactionRef.current !== null) return;
+                        startStrokeResize(
+                          e.touches[0].clientX,
+                          e.touches[0].clientY
+                        );
+                      }}
+                      className={`absolute pointer-events-auto shadow-sm ${h.cursor}`}
+                      style={{
+                        left: h.x * widthPx - halfHandlePagePx,
+                        top: h.y * heightPx - halfHandlePagePx,
+                        width: handleSizePagePx,
+                        height: handleSizePagePx,
+                        backgroundColor: '#FFFFFF',
+                        border: `${borderRingPagePx}px solid #2563EB`,
+                        borderRadius: 2 * invZoom,
+                      }}
+                    />
+                  );
+                })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // Box Objects: Image, Text, Rectangle, Square, Ellipse, Circle, Triangle, Highlight
     const leftPx = obj.xMm * basePxPerMm;
     const topPx = obj.yMm * basePxPerMm;
@@ -3161,7 +3666,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       onPointerDown={handleWorkspacePointerDown}
       onPointerMove={handleWorkspacePointerMove}
       onPointerUp={handleWorkspacePointerUp}
-      onPointerCancel={handleWorkspacePointerUp}
+      onPointerCancel={handleWorkspacePointerCancel}
       onMouseDown={handleWorkspaceMouseDown}
       onMouseMove={handleWorkspaceMouseMove}
       onMouseUp={finishWorkspaceInteraction}
@@ -3171,7 +3676,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       onTouchStart={handleWorkspaceTouchStart}
       onTouchMove={handleWorkspaceTouchMove}
       onTouchEnd={handleWorkspaceTouchEnd}
-      onTouchCancel={handleWorkspaceTouchEnd}
+      onTouchCancel={handleWorkspaceTouchCancel}
       onWheel={handleWheel}
       onDragOver={(e) => {
         e.preventDefault();
@@ -3190,6 +3695,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       className={`workspace-canvas relative flex-1 bg-slate-200/85 overflow-hidden overscroll-none touch-none select-none ${
         isSpacePressed || activeTool === 'pan' || interaction?.mode === 'panning'
           ? 'cursor-grab active:cursor-grabbing'
+          : activeTool === 'eraser'
+          ? 'cursor-cell'
           : activeTool !== 'select'
           ? 'cursor-crosshair'
           : 'cursor-default'
@@ -3421,7 +3928,38 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
             );
           })()}
 
-          {/* Interactive Creation Ghost Preview */}
+          {/* Live In-Progress Freehand Pen / Highlighter Stroke Preview */}
+          {interaction?.mode === 'drawing-freehand' && (() => {
+            const pts = interaction.pointsMm.map((pt) => ({
+              x: pt.xMm * basePxPerMm,
+              y: pt.yMm * basePxPerMm,
+            }));
+            if (pts.length === 1) {
+              pts.push({ x: pts[0].x + 0.2, y: pts[0].y });
+            }
+            const d = buildSmoothFreehandSvgPath(pts);
+            return (
+              <svg
+                className="absolute inset-0 overflow-visible pointer-events-none z-40"
+                style={{
+                  width: doc.widthMm * basePxPerMm,
+                  height: doc.heightMm * basePxPerMm,
+                  opacity: interaction.opacity,
+                }}
+              >
+                <path
+                  d={d}
+                  fill="none"
+                  stroke={interaction.strokeColor}
+                  strokeWidth={Math.max(1.2, interaction.strokeWidthMm * basePxPerMm)}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            );
+          })()}
+
+          {/* Interactive WYSIWYG Creation Preview */}
           {interaction?.mode === 'creating-object' && (() => {
             const { tool, startMmX, startMmY, currentMmX, currentMmY } = interaction;
             if (tool === 'line' || tool === 'arrow' || tool === 'dimension') {
@@ -3439,21 +3977,109 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                 </svg>
               );
             }
-            const minX = Math.min(startMmX, currentMmX) * basePxPerMm;
-            const minY = Math.min(startMmY, currentMmY) * basePxPerMm;
-            const w = Math.abs(currentMmX - startMmX) * basePxPerMm;
-            const h = Math.abs(currentMmY - startMmY) * basePxPerMm;
+
+            const box = computeBoxCreationGeometryMm(
+              tool,
+              startMmX,
+              startMmY,
+              currentMmX,
+              currentMmY,
+              false
+            );
+            const leftPx = box.xMm * basePxPerMm;
+            const topPx = box.yMm * basePxPerMm;
+            const widthPx = box.widthMm * basePxPerMm;
+            const heightPx = box.heightMm * basePxPerMm;
+
+            if (widthPx < 0.5 && heightPx < 0.5) {
+              return null;
+            }
+
+            if (tool === 'text') {
+              return (
+                <div
+                  className="absolute bg-blue-500/10 pointer-events-none z-40"
+                  style={{
+                    left: leftPx,
+                    top: topPx,
+                    width: widthPx,
+                    height: heightPx,
+                    border: `${2 * invZoom}px dashed #2563EB`,
+                  }}
+                />
+              );
+            }
+
+            const sheetScale = Math.max(0.35, doc.widthMm / 1189);
+            const strokeWidthMm =
+              tool === 'highlight' ? 0 : Number((1.2 * sheetScale).toFixed(1));
+            const strokePx =
+              strokeWidthMm > 0 ? Math.max(1, strokeWidthMm * basePxPerMm) : 0;
+            const highlightPreset =
+              tool === 'highlight'
+                ? HIGHLIGHT_PRESETS.find((p) => p.color === activeHighlightColor)
+                : undefined;
+            const previewOpacity =
+              tool === 'highlight'
+                ? highlightPreset
+                  ? highlightPreset.opacity
+                  : 0.35
+                : 1;
+            const previewFill =
+              tool === 'highlight'
+                ? activeHighlightColor || '#FACC15'
+                : '#E0F2FE';
+            const previewStroke = tool === 'highlight' ? 'none' : '#0284C7';
+
             return (
               <div
-                className="absolute bg-blue-500/10 pointer-events-none z-40"
+                className="absolute pointer-events-none z-40"
                 style={{
-                  left: minX,
-                  top: minY,
-                  width: w,
-                  height: h,
-                  border: `${2 * invZoom}px dashed #2563EB`,
+                  left: leftPx,
+                  top: topPx,
+                  width: widthPx,
+                  height: heightPx,
+                  outline: `${Math.max(1, 1.4 * invZoom)}px dashed rgba(37, 99, 235, 0.55)`,
                 }}
-              />
+              >
+                <svg
+                  className="w-full h-full overflow-visible pointer-events-none"
+                  style={{ opacity: previewOpacity }}
+                >
+                  {(tool === 'rectangle' || tool === 'square' || tool === 'highlight') && (
+                    <rect
+                      x={strokePx / 2}
+                      y={strokePx / 2}
+                      width={Math.max(1, widthPx - strokePx)}
+                      height={Math.max(1, heightPx - strokePx)}
+                      fill={previewFill}
+                      stroke={previewStroke}
+                      strokeWidth={strokePx}
+                    />
+                  )}
+                  {(tool === 'ellipse' || tool === 'circle') && (
+                    <ellipse
+                      cx={widthPx / 2}
+                      cy={heightPx / 2}
+                      rx={Math.max(1, (widthPx - strokePx) / 2)}
+                      ry={Math.max(1, (heightPx - strokePx) / 2)}
+                      fill={previewFill}
+                      stroke={previewStroke}
+                      strokeWidth={strokePx}
+                    />
+                  )}
+                  {tool === 'triangle' && (
+                    <polygon
+                      points={`${widthPx / 2},${strokePx / 2} ${widthPx - strokePx / 2},${
+                        heightPx - strokePx / 2
+                      } ${strokePx / 2},${heightPx - strokePx / 2}`}
+                      fill={previewFill}
+                      stroke={previewStroke}
+                      strokeWidth={strokePx}
+                    />
+                  )}
+                </svg>
+              </div>
             );
           })()}
 

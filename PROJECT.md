@@ -240,6 +240,44 @@
     - Also grouped text-field edits in `PropertiesPanel.tsx` (`Object Label`, `Text Content`, `Dimension Text Override`) via `hasRecordedTextFieldHistoryRef` so typing in a text property field records one Undo entry per focus session.
   - Updated `handleUndo` and `handleRedo` in `src/App.tsx` to preserve `selectedObjectId` and `selectedObjectIds` when the selected object(s) still exist on the restored page so the Properties panel remains open and immediately reflects the restored numeric values on `Ctrl/Cmd+Z` and `Ctrl/Cmd+Y`.
 
+### Milestone 19 — Freehand Pen, Freehand Highlighter and Basic Eraser
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Freehand Pen, Highlighter and Eraser"*
+- **Engineering Changes**:
+  - **Non-Destructive Millimetre Vector Stroke Model (`FreehandStrokeObject`)**:
+    - Added `'pen' | 'freehand-highlighter' | 'eraser'` to `ToolType` and added `FreehandStrokeObject` (`type: 'freehand'`, `strokeTool: 'pen' | 'highlighter'`, `pointsMm: Array<{ xMm, yMm }>`, `strokeColor`, `strokeWidthMm`, `opacity`) to `src/model/documentTypes.ts`.
+    - Added `syncFreehandBoundingBox`, `resizeFreehandStrokeMm`, `buildSmoothFreehandSvgPath` (quadratic Bezier midpoint smoothing), and `isPointNearFreehandStrokeMm` to `src/utils/units.ts`, and integrated `freehand` strokes into `translatePageObjectMm`, `scaleChildInGroupMm`, and `rotateChildAroundCenterMm`.
+  - **Windows Snipping Tool-Style Toolbar Popovers (`src/components/TopToolbar.tsx`)**:
+    - Added **Pen** split button (12 preset colour circles, `0.3–5.0 mm` thickness slider, live curved SVG preview), **Highlighter** split button (6 fluorescent colours, `2–20 mm` thickness slider, live translucent curved SVG preview), and **Eraser** button while preserving the existing rectangular **Area Highlight** tool.
+  - **Canvas Freehand Drawing, Whole-Stroke Eraser & Touch Safety (`src/components/EditorCanvas.tsx`)**:
+    - Implemented `drawing-freehand` and `erasing-freehand` interaction modes with distance-thresholded point sampling (`0.35 mm`) and single-path translucent rendering (`opacity: 0.38` for highlighter so strokes never self-darken).
+    - Whole-stroke **Eraser** (`eraseFreehandStrokeAtMm`) erases only unlocked `freehand` Pen/Highlighter strokes on click or drag-across and strictly ignores images, text, lines, arrows, dimensions, shapes, and rectangular Area Highlights.
+    - Multi-touch 2-finger pinch/pan (`startPinchAndTwoFingerPan`) and `pointercancel`/`touchcancel` cleanly discard any in-progress freehand stroke without committing stray marks.
+  - **Properties Inspector, `.lay` Persistence & Vector PDF / Image Exports**:
+    - Updated `src/components/PropertiesPanel.tsx` so selected `freehand` strokes can be moved, resized, rotated, aligned to page, or styled (colour, opacity, thickness in `mm`).
+    - Added `sanitizeLoadedPageObjects` in `src/services/layFileService.ts` for validated `.lay` round-trip persistence.
+    - Added `renderFreehandObjectToPdf` in `src/services/pdfExportService.ts` (`pdf-lib` vector SVG paths with round line caps/joins and single-path opacity) and `renderFreehandOnCanvas` in `src/services/imageExportService.ts` + `src/components/PagesSidebar.tsx`.
+
+### Milestone 20 — Toolbar Dropdowns, Remembered Shape State & WYSIWYG Shape Preview
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Toolbar Dropdowns and WYSIWYG Shape Preview"*
+- **Confirmed Root Causes**:
+  1. **Shapes Button Reverting to "Rectangle" (`src/components/TopToolbar.tsx`)**:
+     - The Shapes button derived its displayed icon and label solely from `isShapeTool ? activeTool : 'Rectangle'`. When `finishWorkspaceInteraction` returned `activeTool` to `'select'` after drawing a Circle, Ellipse, Square, or Triangle, `isShapeTool` became `false` and the button label immediately reverted to `Rectangle`.
+  2. **Generic Dashed Box Preview Instead of WYSIWYG Shape (`src/components/EditorCanvas.tsx`)**:
+     - The `creating-object` preview block rendered a single generic `<div className="absolute bg-blue-500/10" ... />` rectangle for all non-linear tools, without applying the `1:1` equal-side rule for `square`/`circle` or rendering the actual SVG `<rect>`, `<ellipse>`, `<polygon>`, or translucent highlight geometry.
+  3. **Second Click Required to Open Tool Dropdowns (`src/components/TopToolbar.tsx`)**:
+     - Clicking the main label of `Shapes`, `Pen`, `Highlighter`, or `Area Highlight` only called `onSelectTool(...)` without opening the tool's dropdown menu on the first click.
+  4. **Misaligned Hardcoded Dropdown Offsets (`src/components/TopToolbar.tsx`)**:
+     - Dropdown menus used hardcoded Tailwind offsets (`left-2 sm:left-60`, `sm:left-64`, `sm:left-76`, `sm:left-80`) instead of measuring each trigger button's actual bounding rect.
+- **Engineering Changes**:
+  - Added `lastSelectedShape` UI state in `src/components/TopToolbar.tsx` so the Shapes button remembers and displays the chosen shape (`Rectangle`, `Square`, `Ellipse`, `Circle`, or `Triangle`) and its icon even after the editor returns to `Select` post-drawing.
+  - Updated `Shapes`, `Pen`, `Highlighter`, and `Area Highlight` buttons in `src/components/TopToolbar.tsx` so clicking the main button activates the tool and opens its dropdown/settings popover on the first click, while clicking outside or pressing `Escape` closes the menu without deactivating the active tool.
+  - Replaced hardcoded dropdown offsets in `src/components/TopToolbar.tsx` with trigger-ref `getBoundingClientRect()` measurement (`computeMenuCoords`), viewport boundary clamping, `resize`/`scroll` listeners (including horizontal toolbar strip scroll), and `createPortal(..., document.body)`.
+  - Added `computeBoxCreationGeometryMm` and an SVG WYSIWYG live creation preview in `src/components/EditorCanvas.tsx` so dragging `Rectangle`, `Square` (`1:1`), `Ellipse`, `Circle` (`1:1`), `Triangle`, or `Area Highlight` previews the exact shape geometry, aspect ratio, fill, stroke, and opacity in all drag directions.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference
@@ -272,18 +310,16 @@
 
 | Subsystem | Key Files | Status | Notes |
 | :--- | :--- | :---: | :--- |
-| Canonical `mm` Data Model | `src/model/documentTypes.ts`, `src/utils/units.ts` | Verified | ISO A0–A4 + Custom sizes, `GroupObject`, DPI math |
+| Canonical `mm` Data Model | `src/model/documentTypes.ts`, `src/utils/units.ts` | Verified | ISO A0–A4 + Custom sizes, `GroupObject`, `FreehandStrokeObject`, DPI math |
 | Zoom-Invariant Canvas | `src/components/EditorCanvas.tsx` | Verified | 1:1 `mm` layout scaled via GPU compositor |
-| Mobile Touch & Pinch Zoom | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1-finger pan, 2-finger pinch zoom & focal pan |
+| Mobile Touch & Pinch Zoom | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1-finger pan, 2-finger pinch zoom & focal pan, multi-touch stroke cancel |
 | Viewport & Overflow Lock | `index.html`, `src/index.css`, `src/App.tsx` | Verified | `100dvh` lock, `overscroll-none`, isolated drawer positioning |
 | Ruler & Guideline Isolation | `src/components/Rulers.tsx`, `src/components/EditorCanvas.tsx` | Verified | Target & coordinate checks prevent accidental page pan |
 | Magnetic Snap to Objects | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx` | Verified | Snaps to edges & centres of other objects + TopToolbar toggle |
 | Configurable Angle & Linear `1 mm` Precision | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx`, `src/components/PropertiesPanel.tsx` | Verified | `1°–45°` angle snap, `1 mm` line start & length snap + trigonometric endpoint precision, `1 mm` guide snap, Touch Precision Mode |
+| Freehand Pen, Highlighter & Eraser | `src/components/TopToolbar.tsx`, `src/components/EditorCanvas.tsx`, `src/services/pdfExportService.ts` | Verified | Snipping Tool-style colour/thickness popovers, smooth `mm` vector paths, whole-stroke Eraser |
 | Page Alignment Controls | `src/components/PropertiesPanel.tsx` | Verified | Left, Center H, Right, Top, Center V, Bottom, Center Both |
 | Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx` | Verified | `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
 | Undo/Redo & Keyboard Shortcuts Suite | `src/App.tsx`, `src/components/EditorCanvas.tsx` | Verified | Pre-drag history snapshots, Undo (`Ctrl+Z`), Redo (`Ctrl+Y`/`Ctrl+Shift+Z`), Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
 | `.lay` Archive Save / Save As / Open | `src/services/layFileService.ts`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation |
 | Vector PDF & High-DPI Export | `src/services/pdfExportService.ts`, `src/services/imageExportService.ts` | Verified | `pdf-lib` vector output + 72/150/300 DPI PNG/JPG |
-
-
-

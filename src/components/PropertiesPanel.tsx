@@ -46,6 +46,7 @@ import {
 } from 'lucide-react';
 import {
   AVAILABLE_FONTS,
+  FREEHAND_HIGHLIGHTER_PRESETS,
   Guideline,
   HIGHLIGHT_PRESETS,
   ImageAsset,
@@ -53,6 +54,7 @@ import {
   PageLayDocument,
   PageObject,
   PaperFormat,
+  PEN_COLOR_PRESETS,
 } from '../model/documentTypes';
 import {
   calculateEffectiveDpi,
@@ -61,6 +63,7 @@ import {
   getCombinedBoundsMm,
   getLineLengthMm,
   ISO_PAPER_SIZES,
+  resizeFreehandStrokeMm,
   resizeGroupObjectMm,
   rotateGroupObjectMm,
   syncLinearBoundingBox,
@@ -1009,7 +1012,7 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
         }),
         true
       );
-    } else if (selectedObject.type === 'group') {
+    } else if (selectedObject.type === 'group' || selectedObject.type === 'freehand') {
       let nextX = selectedObject.xMm;
       let nextY = selectedObject.yMm;
 
@@ -1469,7 +1472,10 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                     disabled={Boolean(selectedObject.locked)}
                     value={formatMm(selectedObject.xMm, 2)}
                     onCommit={(val) => {
-                      if (selectedObject.type === 'group') {
+                      if (
+                        selectedObject.type === 'group' ||
+                        selectedObject.type === 'freehand'
+                      ) {
                         onUpdateObject(
                           translatePageObjectMm(
                             selectedObject,
@@ -1494,7 +1500,10 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                     disabled={Boolean(selectedObject.locked)}
                     value={formatMm(selectedObject.yMm, 2)}
                     onCommit={(val) => {
-                      if (selectedObject.type === 'group') {
+                      if (
+                        selectedObject.type === 'group' ||
+                        selectedObject.type === 'freehand'
+                      ) {
                         onUpdateObject(
                           translatePageObjectMm(
                             selectedObject,
@@ -1523,6 +1532,17 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                       if (selectedObject.type === 'group') {
                         onUpdateObject(
                           resizeGroupObjectMm(
+                            selectedObject,
+                            selectedObject.xMm,
+                            selectedObject.yMm,
+                            val,
+                            selectedObject.heightMm
+                          ),
+                          true
+                        );
+                      } else if (selectedObject.type === 'freehand') {
+                        onUpdateObject(
+                          resizeFreehandStrokeMm(
                             selectedObject,
                             selectedObject.xMm,
                             selectedObject.yMm,
@@ -1577,6 +1597,17 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                       if (selectedObject.type === 'group') {
                         onUpdateObject(
                           resizeGroupObjectMm(
+                            selectedObject,
+                            selectedObject.xMm,
+                            selectedObject.yMm,
+                            selectedObject.widthMm,
+                            val
+                          ),
+                          true
+                        );
+                      } else if (selectedObject.type === 'freehand') {
+                        onUpdateObject(
+                          resizeFreehandStrokeMm(
                             selectedObject,
                             selectedObject.xMm,
                             selectedObject.yMm,
@@ -2590,6 +2621,104 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
             </div>
           </div>
         )}
+        {/* FREEHAND PEN / HIGHLIGHTER STROKE STYLING */}
+        {selectedObject.type === 'freehand' && (
+          <div className="border-t border-slate-200 pt-3.5 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-slate-700">
+                {selectedObject.strokeTool === 'highlighter'
+                  ? 'Highlighter Stroke'
+                  : 'Pen Stroke'}{' '}
+                Appearance
+              </span>
+              <span className="text-[10px] font-mono text-slate-400">
+                {selectedObject.pointsMm.length} pts
+              </span>
+            </div>
+
+            <div>
+              <label className="block text-[11px] text-slate-500 mb-1.5">
+                Preset Colours
+              </label>
+              <div className="grid grid-cols-6 gap-1.5">
+                {(selectedObject.strokeTool === 'highlighter'
+                  ? FREEHAND_HIGHLIGHTER_PRESETS
+                  : PEN_COLOR_PRESETS
+                ).map((preset) => {
+                  const isActive =
+                    selectedObject.strokeColor.toUpperCase() ===
+                    preset.color.toUpperCase();
+                  return (
+                    <button
+                      key={preset.name}
+                      type="button"
+                      onClick={() =>
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            strokeColor: preset.color,
+                          },
+                          true
+                        )
+                      }
+                      className={`w-7 h-7 rounded-full border transition-transform flex items-center justify-center ${
+                        isActive
+                          ? 'ring-2 ring-blue-600 ring-offset-1 scale-105 border-slate-400'
+                          : 'border-slate-300 hover:scale-105'
+                      }`}
+                      style={{ backgroundColor: preset.color }}
+                      title={preset.name}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] text-slate-500 mb-1">
+                  Stroke Colour
+                </label>
+                <input
+                  type="color"
+                  value={selectedObject.strokeColor || '#0F172A'}
+                  onChange={(e) =>
+                    onUpdateObject(
+                      { ...selectedObject, strokeColor: e.target.value },
+                      true
+                    )
+                  }
+                  className="w-full h-7 rounded border border-slate-200 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-500 mb-1">
+                  Thickness (mm)
+                </label>
+                <NumericPropertyInput
+                  min={0.2}
+                  max={30}
+                  precision={2}
+                  allowNegative={false}
+                  value={selectedObject.strokeWidthMm}
+                  onCommit={(val) =>
+                    onUpdateObject(
+                      {
+                        ...selectedObject,
+                        strokeWidthMm: val,
+                      },
+                      true
+                    )
+                  }
+                  ariaLabel="Freehand stroke thickness in millimetres"
+                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* GROUP CONTENTS INSPECTOR */}
         {selectedObject.type === 'group' && (
           <div className="border-t border-slate-200 pt-3.5 space-y-2.5">

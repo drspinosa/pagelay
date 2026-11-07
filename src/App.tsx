@@ -84,6 +84,12 @@ export default function App() {
 
   const [activeTool, setActiveTool] = useState<ToolType>('select');
   const [activeHighlightColor, setActiveHighlightColor] = useState<string>('#FACC15');
+  const [penColor, setPenColor] = useState<string>('#0F172A');
+  const [penWidthMm, setPenWidthMm] = useState<number>(0.8);
+  const [freehandHighlighterColor, setFreehandHighlighterColor] =
+    useState<string>('#FACC15');
+  const [freehandHighlighterWidthMm, setFreehandHighlighterWidthMm] =
+    useState<number>(6);
 
   // Responsive sidebar visibility: open by default on desktop (>= 1024px), drawer on mobile (< 1024px)
   const [isPagesOpen, setIsPagesOpen] = useState<boolean>(() =>
@@ -365,24 +371,31 @@ export default function App() {
   }, [selectedObjectIds, selectedObject, currentPage.objects]);
 
   /**
-   * Adds a new object to the active page and selects it.
+   * Adds a new object to the active page and optionally selects it.
    */
   const handleAddObject = useCallback(
-    (newObj: PageObject, enterEditText = false) => {
-      pushHistory(doc);
-      setDoc((prev) => {
-        const nextPages = prev.pages.map((p, idx) =>
-          idx === activePageIndex ? { ...p, objects: [...p.objects, newObj] } : p
-        );
-        return { ...prev, pages: nextPages, updatedAt: new Date().toISOString() };
-      });
-      setSelectedObjectId(newObj.id);
-      setSelectedObjectIds([newObj.id]);
+    (newObj: PageObject, enterEditText = false, selectNewObject = true) => {
+      pushHistory(docRef.current);
+      const prev = docRef.current;
+      const nextPages = prev.pages.map((p, idx) =>
+        idx === activePageIndex ? { ...p, objects: [...p.objects, newObj] } : p
+      );
+      const nextDoc: PageLayDocument = {
+        ...prev,
+        pages: nextPages,
+        updatedAt: new Date().toISOString(),
+      };
+      docRef.current = nextDoc;
+      setDoc(nextDoc);
+      if (selectNewObject) {
+        setSelectedObjectId(newObj.id);
+        setSelectedObjectIds([newObj.id]);
+      }
       if (enterEditText && newObj.type === 'text') {
         setEditingTextId(newObj.id);
       }
     },
-    [doc, activePageIndex, pushHistory]
+    [activePageIndex, pushHistory]
   );
 
   /**
@@ -550,21 +563,26 @@ export default function App() {
    */
   const handleDeleteObject = useCallback(
     (id: string) => {
-      pushHistory(doc);
-      setDoc((prev) => {
-        const nextPages = prev.pages.map((p, idx) =>
-          idx === activePageIndex
-            ? { ...p, objects: p.objects.filter((o) => o.id !== id) }
-            : p
-        );
-        return { ...prev, pages: nextPages, updatedAt: new Date().toISOString() };
-      });
+      pushHistory(docRef.current);
+      const prev = docRef.current;
+      const nextPages = prev.pages.map((p, idx) =>
+        idx === activePageIndex
+          ? { ...p, objects: p.objects.filter((o) => o.id !== id) }
+          : p
+      );
+      const nextDoc: PageLayDocument = {
+        ...prev,
+        pages: nextPages,
+        updatedAt: new Date().toISOString(),
+      };
+      docRef.current = nextDoc;
+      setDoc(nextDoc);
       if (selectedObjectId === id) setSelectedObjectId(null);
-      setSelectedObjectIds((prev) => prev.filter((item) => item !== id));
+      setSelectedObjectIds((prevIds) => prevIds.filter((item) => item !== id));
       if (croppingImageId === id) setCroppingImageId(null);
       if (editingTextId === id) setEditingTextId(null);
     },
-    [doc, activePageIndex, selectedObjectId, croppingImageId, editingTextId, pushHistory]
+    [activePageIndex, selectedObjectId, croppingImageId, editingTextId, pushHistory]
   );
 
   /**
@@ -1228,9 +1246,22 @@ export default function App() {
           setActiveTool(t);
           setCroppingImageId(null);
           setEditingTextId(null);
+          if (t === 'pen' || t === 'freehand-highlighter' || t === 'eraser') {
+            setSelectedObjectId(null);
+            setSelectedObjectIds([]);
+            setSelectedGuideId(null);
+          }
         }}
         activeHighlightColor={activeHighlightColor}
         onSelectHighlightColor={setActiveHighlightColor}
+        penColor={penColor}
+        penWidthMm={penWidthMm}
+        onChangePenColor={setPenColor}
+        onChangePenWidthMm={setPenWidthMm}
+        freehandHighlighterColor={freehandHighlighterColor}
+        freehandHighlighterWidthMm={freehandHighlighterWidthMm}
+        onChangeFreehandHighlighterColor={setFreehandHighlighterColor}
+        onChangeFreehandHighlighterWidthMm={setFreehandHighlighterWidthMm}
         canUndo={historyPast.length > 0}
         canRedo={historyFuture.length > 0}
         onUndo={handleUndo}
@@ -1434,6 +1465,10 @@ export default function App() {
           panY={panY}
           activeTool={activeTool}
           activeHighlightColor={activeHighlightColor}
+          penColor={penColor}
+          penWidthMm={penWidthMm}
+          freehandHighlighterColor={freehandHighlighterColor}
+          freehandHighlighterWidthMm={freehandHighlighterWidthMm}
           selectedObjectId={selectedObjectId}
           selectedObjectIds={selectedObjectIds}
           selectedGuideId={selectedGuideId}
@@ -1497,6 +1532,7 @@ export default function App() {
           cursorMm={cursorMm}
           onCursorMoveMm={setCursorMm}
           onAddObject={handleAddObject}
+          onDeleteObject={handleDeleteObject}
           onUpdateObject={handleUpdateObject}
           onUpdateMultipleObjects={handleUpdateMultipleObjects}
           onRecordHistorySnapshot={() => pushHistory(docRef.current)}

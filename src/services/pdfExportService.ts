@@ -17,6 +17,7 @@ import {
   StandardFonts,
   rgb,
   LineCapStyle,
+  LineJoinStyle,
   pushGraphicsState,
   popGraphicsState,
   translate,
@@ -33,6 +34,8 @@ import {
   setFillingRgbColor,
   setStrokingRgbColor,
   setLineWidth,
+  setLineCap,
+  setLineJoin,
   setDashPattern,
   restoreDashPattern,
 } from 'pdf-lib';
@@ -40,6 +43,7 @@ import {
   ArrowObject,
   AVAILABLE_FONTS,
   DimensionObject,
+  FreehandStrokeObject,
   ImageAsset,
   ImageObject,
   LineObject,
@@ -47,7 +51,12 @@ import {
   ShapeObject,
   TextObject,
 } from '../model/documentTypes';
-import { flattenPageObjects, getLineLengthMm, mmToPt } from '../utils/units';
+import {
+  buildSmoothFreehandSvgPath,
+  flattenPageObjects,
+  getLineLengthMm,
+  mmToPt,
+} from '../utils/units';
 
 export interface FontSubstitutionWarning {
   objectId: string;
@@ -292,6 +301,8 @@ export async function generatePdfBytes(doc: PageLayDocument): Promise<Uint8Array
         renderArrowObjectToPdf(page, obj, pageHeightPt);
       } else if (obj.type === 'dimension') {
         await renderDimensionObjectToPdf(page, obj, pageHeightPt, getFont);
+      } else if (obj.type === 'freehand') {
+        renderFreehandObjectToPdf(page, obj, pageHeightPt);
       } else {
         renderShapeObjectToPdf(page, obj, pageHeightPt);
       }
@@ -299,6 +310,52 @@ export async function generatePdfBytes(doc: PageLayDocument): Promise<Uint8Array
   }
 
   return await pdfDoc.save();
+}
+
+function renderFreehandObjectToPdf(
+  page: PDFPage,
+  obj: FreehandStrokeObject,
+  pageHeightPt: number
+) {
+  if (!obj.pointsMm || obj.pointsMm.length === 0) return;
+
+  const strokeRgb = parseHexColor(obj.strokeColor) || { r: 0.06, g: 0.09, b: 0.16 };
+  const thicknessPt = mmToPt(Math.max(0.2, obj.strokeWidthMm));
+  const wPt = mmToPt(obj.widthMm);
+  const hPt = mmToPt(obj.heightMm);
+  const centerXPt = mmToPt(obj.xMm + obj.widthMm / 2);
+  const centerYPt = pageHeightPt - mmToPt(obj.yMm + obj.heightMm / 2);
+
+  const localPts = obj.pointsMm.map((pt) => ({
+    x: mmToPt(pt.xMm - obj.xMm),
+    y: mmToPt(pt.yMm - obj.yMm),
+  }));
+
+  if (localPts.length === 1) {
+    localPts.push({ x: localPts[0].x + 0.05, y: localPts[0].y });
+  }
+
+  const svgPath = buildSmoothFreehandSvgPath(localPts);
+  if (!svgPath) return;
+
+  page.pushOperators(
+    pushGraphicsState(),
+    translate(centerXPt, centerYPt),
+    rotateDegrees(-obj.rotationDeg),
+    setLineCap(LineCapStyle.Round),
+    setLineJoin(LineJoinStyle.Round)
+  );
+
+  page.drawSvgPath(svgPath, {
+    x: -wPt / 2,
+    y: hPt / 2,
+    borderColor: rgb(strokeRgb.r, strokeRgb.g, strokeRgb.b),
+    borderWidth: thicknessPt,
+    borderOpacity: obj.opacity,
+    borderLineCap: LineCapStyle.Round,
+  });
+
+  page.pushOperators(popGraphicsState());
 }
 
 async function renderImageObjectToPdf(

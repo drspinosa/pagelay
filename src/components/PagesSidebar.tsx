@@ -16,7 +16,7 @@
 import React from 'react';
 import { Plus, Copy, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
 import { ImageAsset, PageData } from '../model/documentTypes';
-import { flattenPageObjects } from '../utils/units';
+import { buildSmoothFreehandSvgPath, flattenPageObjects } from '../utils/units';
 
 interface PagesSidebarProps {
   pages: PageData[];
@@ -199,6 +199,37 @@ export const PagesSidebar: React.FC<PagesSidebarProps> = ({
                             y2={obj.y2Mm * scaleY}
                             stroke={obj.strokeColor || '#DC2626'}
                             strokeWidth={Math.max(1, obj.strokeWidthMm * scaleX)}
+                          />
+                        </svg>
+                      );
+                    }
+
+                    if (obj.type === 'freehand') {
+                      const localPts = (obj.pointsMm || []).map((pt) => ({
+                        x: (pt.xMm - obj.xMm) * scaleX,
+                        y: (pt.yMm - obj.yMm) * scaleY,
+                      }));
+                      const d = buildSmoothFreehandSvgPath(localPts);
+                      return (
+                        <svg
+                          key={obj.id}
+                          className="absolute overflow-visible pointer-events-none"
+                          style={{
+                            left,
+                            top,
+                            width: w,
+                            height: h,
+                            transform: `rotate(${obj.rotationDeg}deg)`,
+                            opacity: obj.opacity,
+                          }}
+                        >
+                          <path
+                            d={d}
+                            fill="none"
+                            stroke={obj.strokeColor || '#0F172A'}
+                            strokeWidth={Math.max(1, obj.strokeWidthMm * scaleX)}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
                           />
                         </svg>
                       );

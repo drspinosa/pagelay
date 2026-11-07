@@ -16,6 +16,9 @@ export type ToolType =
   | 'select'
   | 'pan'
   | 'text'
+  | 'pen'
+  | 'freehand-highlighter'
+  | 'eraser'
   | 'line'
   | 'arrow'
   | 'dimension'
@@ -165,6 +168,20 @@ export interface GroupObject extends BaseObject {
   children: PageObject[];
 }
 
+export interface FreehandPointMm {
+  xMm: number;
+  yMm: number;
+}
+
+export interface FreehandStrokeObject extends BaseObject {
+  type: 'freehand';
+  strokeTool: 'pen' | 'highlighter';
+  /** Polyline vertices in canonical page millimetres (mm) (unrotated local frame relative to object center) */
+  pointsMm: FreehandPointMm[];
+  strokeColor: string;
+  strokeWidthMm: number;
+}
+
 export type PageObject =
   | ImageObject
   | TextObject
@@ -172,7 +189,8 @@ export type PageObject =
   | ArrowObject
   | DimensionObject
   | ShapeObject
-  | GroupObject;
+  | GroupObject
+  | FreehandStrokeObject;
 
 export interface PageData {
   id: string;
@@ -290,3 +308,33 @@ export const HIGHLIGHT_PRESETS = [
   { name: 'Green', color: '#22C55E', opacity: 0.32 },
   { name: 'Blue', color: '#3B82F6', opacity: 0.32 },
 ];
+
+export interface PenColorPreset {
+  name: string;
+  color: string;
+}
+
+export const PEN_COLOR_PRESETS: PenColorPreset[] = [
+  { name: 'Black', color: '#0F172A' },
+  { name: 'White', color: '#FFFFFF' },
+  { name: 'Grey', color: '#64748B' },
+  { name: 'Red', color: '#DC2626' },
+  { name: 'Blue', color: '#2563EB' },
+  { name: 'Green', color: '#16A34A' },
+  { name: 'Yellow', color: '#EAB308' },
+  { name: 'Orange', color: '#EA580C' },
+  { name: 'Purple', color: '#7C3AED' },
+  { name: 'Pink', color: '#DB2777' },
+  { name: 'Cyan', color: '#0891B2' },
+  { name: 'Brown', color: '#92400E' },
+];
+
+export const FREEHAND_HIGHLIGHTER_PRESETS: PenColorPreset[] = [
+  { name: 'Yellow', color: '#FACC15' },
+  { name: 'Green', color: '#4ADE80' },
+  { name: 'Cyan', color: '#22D3EE' },
+  { name: 'Pink', color: '#F472B6' },
+  { name: 'Orange', color: '#FB923C' },
+  { name: 'Purple', color: '#C084FC' },
+];
+
