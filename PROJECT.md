@@ -173,6 +173,73 @@
   - **Touch Precision Mode & Structured Guides & Snap Menu**:
     - Reorganized the **Guides & Snap** dropdown in `src/components/TopToolbar.tsx` into three compact sections: **Magnetic Snapping**, **Angle Snapping**, and **Precision** (including the **Precision Mode (Touch)** toggle and toolbar active badge).
 
+### Milestone 15 — Precision Line Drawing (`1 mm` Position & Length Snapping) and `Save As...` Document Naming
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Fix Precision Line Drawing and Save As Naming"*
+- **Engineering Changes**:
+  - **Precision Line Drawing — `1 mm` Position and Length Snapping**:
+    - Extended `startWorkspaceInteraction`, `constrainLineEndpointByAngleMm`, `processPointerMove`, and `finishWorkspaceInteraction` in `src/components/EditorCanvas.tsx` so when `Precision Mode` is ON or `Shift` is held:
+      - The starting point (`X1, Y1`) of newly drawn lines, arrows, and dimensions snaps to the nearest whole millimetre (`1 mm`) relative to the page origin, while preserving the raw pointer anchor (`rawStartMmX`, `rawStartMmY`) so toggling `Shift` mid-drag never causes jumps or anchor drift.
+      - The physical radial length snaps to whole `1 mm` increments (`Math.round(rawLengthMm)`) simultaneously with the configured angle increment (`1°`–`45°` + exact cardinal axes), calculating the constrained endpoint via trigonometry (`anchorXMm + snappedLengthMm * Math.cos(rad)`, `anchorYMm + snappedLengthMm * Math.sin(rad)` retained to `0.0001 mm` precision) without independently integer-rounding both endpoint coordinates.
+      - Existing line, arrow, and dimension endpoints (`p1` or `p2`) also snap to whole `1 mm` lengths + configured angle increments when dragged with `Shift` or `Precision Mode`, keeping the opposite endpoint fixed.
+      - Added a compact live HUD readout pill at the top-center of the canvas during linear drawing and endpoint dragging (`X: 100 mm | Y: 50 mm | Length: 120 mm | Angle: 10°`).
+  - **Save As... — Synchronized `.lay` Filename, Manifest Name, and Document Title**:
+    - Added `SaveAsModal` in `src/components/Modals.tsx` and **Save As...** triggers in `src/components/TopToolbar.tsx` (desktop toolbar + mobile File menu) and `src/App.tsx` (`Ctrl / Cmd + Shift + S`).
+    - Updated `src/services/layFileService.ts` (`saveDocumentAsLayFile`, `saveDocumentAsLayFileWithPicker`, `loadDocumentFromLayFile`) to update both the exported `<name>.lay` filename and internal `manifest.json` `name`, support the File System Access API (`showSaveFilePicker`) in top-level contexts while gracefully falling back to browser download in embedded/unsupported environments, distinguish confirmed native writes from browser download initiation, ignore cancelled saves cleanly, and adopt the opened `.lay` file's actual filename on load.
+
+### Milestone 16 — Fix Save vs Save As Behaviour (`FileSystemFileHandle` In-Place Overwrite & Native Open Handle Retention)
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Fix Save vs Save As Behaviour"*
+- **Engineering Changes**:
+  - **Save (`Ctrl/Cmd + S` & Save Button)**:
+    - Retained `activeFileHandle: LayFileSystemHandle | null` in runtime state (`src/App.tsx`), kept strictly separate from the serialized `.lay` document model and undo/redo snapshots.
+    - When a document has never been saved (or was opened via `<input type="file">` / drag-and-drop without a writable handle), pressing **Save** / `Ctrl+S` prompts once via `showSaveFilePicker`, writes the `.lay` file, and retains the returned `FileSystemFileHandle`.
+    - On all subsequent **Save** / `Ctrl+S` operations, `saveDocumentToExistingOrNewHandle` verifies/requests `readwrite` permission (`queryPermission` / `requestPermission`) and overwrites the existing file in place using `handle.createWritable()`, `write()`, and `close()` without opening Save As again or producing numbered duplicate downloads.
+    - Guarded against simultaneous concurrent writes to the same file via `isSavingRef`.
+  - **Save As (`Ctrl/Cmd + Shift + S` & Save As... Button)**:
+    - Always opens a new file picker (`saveDocumentAsWithNativePicker`) so the user can choose a new filename or location, updates `activeFileHandle`, `doc.name`, and internal `.lay` manifest `name` only after the write completes, and preserves the previous document and file association if cancelled or failed.
+  - **Open Existing Document (`showOpenFilePicker`)**:
+    - Added `openDocumentWithNativePicker` in `src/services/layFileService.ts` and wired `onTriggerOpenNativePicker` in `src/components/TopToolbar.tsx` and `src/App.tsx` so opening a `.lay` file in supported browsers retains its `FileSystemFileHandle` for direct in-place saving, while falling back cleanly to `<input type="file">` in unsupported or embedded environments.
+
+### Milestone 17 — Urgent Regression Fix: Undo/Redo and Keyboard Shortcuts
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Urgent Regression Fix: Undo/Redo and Keyboard Shortcuts"*
+- **Confirmed Root Causes**:
+  1. **Post-Drag Snapshot Bug & Click No-Op Snapshots (`src/components/EditorCanvas.tsx`)**:
+     - During continuous drag interactions (`moving-object`, `moving-multi`, `resizing-object`, `rotating-object`, `dragging-endpoint`, `cropping-image`, `dragging-guide`), `processPointerMove` called `onUpdateObject(updated, false)` on every pointer move, mutating `doc` in `src/App.tsx` in real time. Then, on pointer release (`finishWorkspaceInteraction`), `EditorCanvas` called `onUpdateObject(currentObj, true)` which invoked `pushHistory(doc)` with the **already-mutated post-drag `doc`** instead of the pre-drag document state. As a result, pressing Undo restored the post-drag state rather than the pre-drag state. Additionally, clicking an object without dragging (`hasMoved === false`) still called `onUpdateObject(currentObj, true)` on pointer release, pushing duplicate no-op snapshots onto `historyPast`.
+  2. **Lingering Focus in Toolbar / Sidebar Controls Blocking Global Shortcuts (`src/components/EditorCanvas.tsx` & `src/App.tsx`)**:
+     - Focusing any `<input>`, `<select>`, or `<button>` in `TopToolbar` or `PropertiesPanel` and then clicking/dragging on `EditorCanvas` left browser focus inside that external form control (`e.preventDefault()` on canvas pointerdown prevented default focus transfer). Because `onKeyDown` in `src/App.tsx` returned early whenever `e.target` was `INPUT`, `TEXTAREA`, or `SELECT`, shortcuts (`Ctrl/Cmd+Z`, `Ctrl/Cmd+Y`, `Ctrl/Cmd+S`, `Delete`, `Ctrl/Cmd+C/V/D`, `Arrow` keys) were ignored.
+  3. **Shortcut Ordering & Selection Guard Issues (`src/App.tsx`)**:
+     - `if (!selectedObject) return;` ran before `Ctrl/Cmd+V` (Paste), preventing Paste whenever no object was selected.
+     - `Ctrl/Cmd+S` and `Ctrl/Cmd+Shift+S` ran after the `INPUT`/`TEXTAREA`/`SELECT` guard, allowing the browser's native "Save Webpage" dialog to intercept `Ctrl+S` when an editor field was focused.
+     - `Escape` did not deselect selected objects/guidelines when already in the `select` tool, and `Delete` / `Arrow` keys did not handle multi-object selections (`selectedObjectIds`) or selected guidelines (`selectedGuideId`) in global shortcuts.
+  4. **Stale Closure & Listener Churn (`src/App.tsx`)**:
+     - `handleUndo` and `handleRedo` depended directly on `[historyPast, doc]` and `[historyFuture, doc]`, recreating handlers and re-binding the global `keydown` listener on every drag frame.
+- **Engineering Changes**:
+  - Added `onRecordHistorySnapshot` prop and `recordDragHistoryOnce()` in `src/components/EditorCanvas.tsx` so continuous drags record the **pre-drag** snapshot once on the first move frame (`hasMoved`), and no-op clicks never pollute `historyPast`.
+  - Added `hasRecordedTextEditHistoryRef` in `src/components/EditorCanvas.tsx` so typing inside an on-canvas text box records one pre-edit undo snapshot per editing session.
+  - Added `blurExternalInputIfFocused()` in `src/components/EditorCanvas.tsx` when interacting with the canvas so lingering focus in toolbar/sidebar inputs is blurred automatically.
+  - Added synchronized refs (`docRef`, `historyPastRef`, `historyFutureRef`) in `src/App.tsx` so `pushHistory`, `handleUndo`, and `handleRedo` always operate on fresh state while keeping `activeFileHandle` preserved across Undo/Redo and Save/Save As.
+  - Updated the global `onKeyDown` listener in `src/App.tsx` to guard modal dialogs, handle `Ctrl/Cmd+S` and `Ctrl/Cmd+Shift+S` globally, preserve native text editing inside inputs/textareas, allow `Ctrl/Cmd+V` without an active selection, and support single/multi-object and guideline deletion, nudging, and `Escape` deselection.
+
+### Milestone 18 — Fix Numeric Properties Undo History (`NumericPropertyInput` Single-Operation Commit)
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Fix Numeric Properties Undo History"*
+- **Confirmed Root Cause**:
+  - Every numeric field in `src/components/PropertiesPanel.tsx` (`X/Y Position`, `Width`, `Height`, `Rotation`, `Opacity`, `Start X1/Y1`, `End X2/Y2`, `Border`, `Font Size`, `Thickness`, `Arrowhead Size`, `Witness Tick`, `Outline Thickness`, and Document `Width`/`Height`) was bound directly via `onChange={(e) => onUpdateObject(...)}` with `recordHistory = true` by default.
+  - Consequently, changing Width from `72.7` to `80` fired `onUpdateObject` on `"8"` (recording `72.7` in history and mutating width to `8 mm`) and again on `"80"` (recording the intermediate `8 mm` in history and mutating width to `80 mm`), requiring two Undos (`80 -> 8 -> 72.7`) and distorting aspect-ratio-locked images or groups on intermediate keystrokes.
+- **Engineering Changes**:
+  - Created `NumericPropertyInput` in `src/components/PropertiesPanel.tsx` and applied it across all numeric geometry and styling fields:
+    - Buffers intermediate typing locally (including decimal prefixes like `72.` and negative signs `-`) without mutating document geometry or pushing intermediate Undo entries on every keystroke.
+    - Commits the validated, clamped numeric change **once** when the user presses `Enter` or leaves the field (`onBlur`), recording exactly **one** pre-edit history snapshot when the value has actually changed.
+    - Restores the original pre-edit value without recording history if the user presses `Escape` or leaves an incomplete/invalid value.
+    - Also grouped text-field edits in `PropertiesPanel.tsx` (`Object Label`, `Text Content`, `Dimension Text Override`) via `hasRecordedTextFieldHistoryRef` so typing in a text property field records one Undo entry per focus session.
+  - Updated `handleUndo` and `handleRedo` in `src/App.tsx` to preserve `selectedObjectId` and `selectedObjectIds` when the selected object(s) still exist on the restored page so the Properties panel remains open and immediately reflects the restored numeric values on `Ctrl/Cmd+Z` and `Ctrl/Cmd+Y`.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference
@@ -181,11 +248,12 @@
 | :--- | :--- |
 | `Ctrl + Click` / `⌘ + Click` (or `Shift + Click`) | Add or toggle multiple objects in selection on the canvas |
 | `Shift + Rotate` | Constrain object/group rotation to configured angle increment (`1°`–`45°`, default `15°`) |
-| `Shift + Drag` (Line / Arrow / Dimension) | Constrain drawing or endpoint angle to configured angle increment + cardinal axes |
+| `Shift + Drag` (Line / Arrow / Dimension) | Snap start point to `1 mm`, physical length to `1 mm`, and angle to configured increment + cardinal axes |
 | `Shift + Drag` (Guideline) | Constrain guideline movement to exact `1 mm` whole-millimetre increments |
 | `Ctrl / Cmd + Z` | Undo last action |
 | `Ctrl / Cmd + Y` or `Ctrl / Cmd + Shift + Z` | Redo action |
-| `Ctrl / Cmd + S` | Save document as `.lay` archive |
+| `Ctrl / Cmd + S` | Save changes to active `.lay` file (or prompt once if never saved) |
+| `Ctrl / Cmd + Shift + S` | Save As... (choose new filename/location and update active file handle) |
 | `Ctrl / Cmd + A` | Select all objects on the active page |
 | `Ctrl / Cmd + G` | Group selected objects (`2+` objects) |
 | `Ctrl / Cmd + Shift + G` | Ungroup selected group entity |
@@ -193,10 +261,10 @@
 | `Ctrl / Cmd + C` | Copy selected object |
 | `Ctrl / Cmd + V` | Paste copied object |
 | `Ctrl / Cmd + D` | Duplicate selected object |
-| `Delete` / `Backspace` | Delete selected object |
-| `Arrow Keys` | Nudge selected object by `1 mm` (`10 mm` with `Shift`) |
+| `Delete` / `Backspace` | Delete selected object(s) or selected guideline |
+| `Arrow Keys` | Nudge selected object(s) by `1 mm` (`10 mm` with `Shift`) |
 | `Spacebar + Drag` | Pan / slide canvas |
-| `Escape` | Exit text editing / crop mode / cancel inline guide edit and return to Select tool |
+| `Escape` | Exit text editing / crop mode / cancel inline guide edit, reset tool to Select, or deselect object(s) |
 
 ---
 
@@ -210,11 +278,12 @@
 | Viewport & Overflow Lock | `index.html`, `src/index.css`, `src/App.tsx` | Verified | `100dvh` lock, `overscroll-none`, isolated drawer positioning |
 | Ruler & Guideline Isolation | `src/components/Rulers.tsx`, `src/components/EditorCanvas.tsx` | Verified | Target & coordinate checks prevent accidental page pan |
 | Magnetic Snap to Objects | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx` | Verified | Snaps to edges & centres of other objects + TopToolbar toggle |
-| Configurable Angle & Guide Precision | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx`, `src/components/PropertiesPanel.tsx` | Verified | `1°–45°` angle snap, `Shift` line/endpoint snap, `1 mm` guide snap, exact decimal guide edit, Touch Precision Mode |
+| Configurable Angle & Linear `1 mm` Precision | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx`, `src/components/PropertiesPanel.tsx` | Verified | `1°–45°` angle snap, `1 mm` line start & length snap + trigonometric endpoint precision, `1 mm` guide snap, Touch Precision Mode |
 | Page Alignment Controls | `src/components/PropertiesPanel.tsx` | Verified | Left, Center H, Right, Top, Center V, Bottom, Center Both |
 | Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx` | Verified | `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
-| Keyboard Shortcuts Suite | `src/App.tsx` | Verified | Undo/Redo, Save, Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
-| `.lay` Archive Save / Load | `src/services/layFileService.ts` | Verified | Lossless `Uint8Array` asset preservation + backwards-compatible precision settings |
+| Undo/Redo & Keyboard Shortcuts Suite | `src/App.tsx`, `src/components/EditorCanvas.tsx` | Verified | Pre-drag history snapshots, Undo (`Ctrl+Z`), Redo (`Ctrl+Y`/`Ctrl+Shift+Z`), Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
+| `.lay` Archive Save / Save As / Open | `src/services/layFileService.ts`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation |
 | Vector PDF & High-DPI Export | `src/services/pdfExportService.ts`, `src/services/imageExportService.ts` | Verified | `pdf-lib` vector output + 72/150/300 DPI PNG/JPG |
+
 
 

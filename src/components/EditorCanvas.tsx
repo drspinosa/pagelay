@@ -87,6 +87,7 @@ interface EditorCanvasProps {
   onAddObject: (obj: PageObject, enterEditText?: boolean) => void;
   onUpdateObject: (obj: PageObject, commitHistory: boolean) => void;
   onUpdateMultipleObjects: (objects: PageObject[], commitHistory: boolean) => void;
+  onRecordHistorySnapshot: () => void;
   onGroupSelected: () => void;
   onUngroupSelected: (groupId: string) => void;
   onUpdateGuidelines: (guidelines: Guideline[], commitHistory: boolean) => void;
@@ -159,6 +160,12 @@ type InteractionState =
       objectId: string;
       endpoint: 'p1' | 'p2';
       initialObject: LineObject | ArrowObject | DimensionObject;
+      anchorMmX: number;
+      anchorMmY: number;
+      currentMmX: number;
+      currentMmY: number;
+      constrainedLengthMm: number;
+      constrainedAngleDeg: number;
     }
   | {
       mode: 'cropping-image';
@@ -171,10 +178,14 @@ type InteractionState =
   | {
       mode: 'creating-object';
       tool: Exclude<ToolType, 'select' | 'pan'>;
+      rawStartMmX: number;
+      rawStartMmY: number;
       startMmX: number;
       startMmY: number;
       currentMmX: number;
       currentMmY: number;
+      constrainedLengthMm: number;
+      constrainedAngleDeg: number;
     };
 
 export const EditorCanvas: React.FC<EditorCanvasProps> = ({
@@ -203,6 +214,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   onAddObject,
   onUpdateObject,
   onUpdateMultipleObjects,
+  onRecordHistorySnapshot,
   onGroupSelected,
   onUngroupSelected,
   onUpdateGuidelines,
@@ -213,6 +225,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
 }) => {
   const [interaction, setInteractionState] = useState<InteractionState | null>(null);
   const interactionRef = useRef<InteractionState | null>(null);
+  const hasRecordedDragHistoryRef = useRef<boolean>(false);
+  const hasRecordedTextEditHistoryRef = useRef<boolean>(false);
   const activePointersRef = useRef<Map<number, { clientX: number; clientY: number }>>(
     new Map()
   );
@@ -237,7 +251,45 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   const onPanChangeRef = useRef(onPanChange);
   onPanChangeRef.current = onPanChange;
 
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  /**
+   * Blurs any focused toolbar/sidebar input, select, or button when the user clicks or drags
+   * on the workspace canvas so global keyboard shortcuts (Ctrl+Z, Ctrl+Y, Delete, etc.) work immediately.
+   */
+  const blurExternalInputIfFocused = () => {
+    if (typeof document === 'undefined') return;
+    const active = document.activeElement as HTMLElement | null;
+    if (!active || active === document.body || active === textareaRef.current) return;
+    const tag = active.tagName;
+    if (
+      tag === 'INPUT' ||
+      tag === 'TEXTAREA' ||
+      tag === 'SELECT' ||
+      tag === 'BUTTON'
+    ) {
+      active.blur();
+    }
+  };
+
+  /**
+   * Records a single pre-drag history snapshot on the first frame that a continuous drag
+   * actually mutates an object or guideline.
+   */
+  const recordDragHistoryOnce = () => {
+    if (!hasRecordedDragHistoryRef.current) {
+      hasRecordedDragHistoryRef.current = true;
+      onRecordHistorySnapshot();
+    }
+  };
+
   const setInteraction = (next: InteractionState | null) => {
+    if (next !== null && interactionRef.current === null) {
+      hasRecordedDragHistoryRef.current = false;
+      blurExternalInputIfFocused();
+    } else if (next === null) {
+      hasRecordedDragHistoryRef.current = false;
+    }
     interactionRef.current = next;
     setInteractionState(next);
   };
@@ -249,8 +301,6 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     horizontalMm: number | null;
   }>({ verticalMm: null, horizontalMm: null });
 
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
   // Base 100% scale factor (px per mm before CSS zoom transform)
   const basePxPerMm = CSS_PX_PER_MM_AT_100;
   // Effective screen px per mm at current zoom
@@ -259,6 +309,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   const invZoom = 1 / Math.max(0.05, zoom);
 
   useEffect(() => {
+    hasRecordedTextEditHistoryRef.current = false;
     if (editingTextId && textareaRef.current) {
       textareaRef.current.focus();
     }
@@ -558,7 +609,6 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       orientation,
       positionMm: initialMm,
     };
-    onUpdateGuidelines([...page.guidelines, newGuide], false);
     setInteraction({
       mode: 'dragging-guide',
       guideId: newGuide.id,
@@ -566,6 +616,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       positionMm: initialMm,
       isNew: true,
     });
+    recordDragHistoryOnce();
+    onUpdateGuidelines([...page.guidelines, newGuide], false);
   };
 
   /**
@@ -577,7 +629,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     isMiddleClick = false,
     target: EventTarget | null = null,
     nativeEvent?: Event,
-    isAdditiveModifier = false
+    isAdditiveModifier = false,
+    shiftKey = false
   ) => {
     if (
       isAdjustingGuideOrRulerRef.current ||
@@ -586,6 +639,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     ) {
       return;
     }
+
+    lastPointerClientRef.current = { clientX, clientY };
+    isShiftPressedRef.current = shiftKey;
 
     if (editingTextId) {
       onSetEditingTextId(null);
@@ -617,13 +673,25 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     const snappedX = snapCoordinateMm(ptMm.x, 'x').snappedMm;
     const snappedY = snapCoordinateMm(ptMm.y, 'y').snappedMm;
 
+    const isLinearTool =
+      activeTool === 'line' || activeTool === 'arrow' || activeTool === 'dimension';
+    const isPrecisionActive = Boolean(shiftKey || doc.precisionMode);
+    const startMmX =
+      isLinearTool && isPrecisionActive ? Math.round(snappedX) : snappedX;
+    const startMmY =
+      isLinearTool && isPrecisionActive ? Math.round(snappedY) : snappedY;
+
     setInteraction({
       mode: 'creating-object',
       tool: activeTool,
-      startMmX: snappedX,
-      startMmY: snappedY,
-      currentMmX: snappedX,
-      currentMmY: snappedY,
+      rawStartMmX: snappedX,
+      rawStartMmY: snappedY,
+      startMmX,
+      startMmY,
+      currentMmX: startMmX,
+      currentMmY: startMmY,
+      constrainedLengthMm: 0,
+      constrainedAngleDeg: 0,
     });
   };
 
@@ -702,7 +770,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       e.button === 1,
       e.target,
       e.nativeEvent,
-      e.ctrlKey || e.metaKey || e.shiftKey
+      e.ctrlKey || e.metaKey || e.shiftKey,
+      e.shiftKey
     );
   };
 
@@ -724,7 +793,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       e.button === 1,
       e.target,
       e.nativeEvent,
-      e.ctrlKey || e.metaKey || e.shiftKey
+      e.ctrlKey || e.metaKey || e.shiftKey,
+      e.shiftKey
     );
   };
 
@@ -911,9 +981,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   };
 
   /**
-   * Constrains a line/arrow/dimension endpoint to multiples of the configured angle increment
-   * measured from the horizontal axis, while always including exact horizontal (0°, 180°) and
-   * vertical (90°, 270°) snap targets and preserving the dragged line length from the fixed anchor.
+   * Constrains a line/arrow/dimension endpoint in Precision Mode (or when Shift is held):
+   * - Snaps radial physical length to whole 1 mm increments.
+   * - Snaps angle to multiples of the configured angle increment (1°–45°) measured from the
+   *   horizontal axis, always including exact horizontal (0°, 180°) and vertical (90°, 270°) axes.
+   * - Computes the endpoint using trigonometry while retaining 4-decimal (0.0001 mm) precision
+   *   so neither angle nor whole-mm length is distorted by independent coordinate rounding.
    */
   const constrainLineEndpointByAngleMm = (
     anchorXMm: number,
@@ -921,14 +994,16 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     rawTargetXMm: number,
     rawTargetYMm: number,
     angleStepDeg: number
-  ): { xMm: number; yMm: number; angleDeg: number } => {
+  ): { xMm: number; yMm: number; lengthMm: number; angleDeg: number } => {
     const dx = rawTargetXMm - anchorXMm;
     const dy = rawTargetYMm - anchorYMm;
-    const lengthMm = Math.hypot(dx, dy);
-    if (lengthMm < 0.001) {
+    const rawLengthMm = Math.hypot(dx, dy);
+    const snappedLengthMm = Math.round(rawLengthMm);
+    if (snappedLengthMm < 1) {
       return {
-        xMm: formatMm(anchorXMm, 2),
-        yMm: formatMm(anchorYMm, 2),
+        xMm: anchorXMm,
+        yMm: anchorYMm,
+        lengthMm: 0,
         angleDeg: 0,
       };
     }
@@ -936,10 +1011,16 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     const step = Math.max(1, Math.min(45, Math.round(angleStepDeg || 15)));
     const rawAngleDeg = ((((Math.atan2(dy, dx) * 180) / Math.PI) % 360) + 360) % 360;
 
-    // Candidate snap angles in [0, 360): multiples of step + exact horizontal/vertical axes
+    // Candidate snap angles in [0, 360): multiples of step + symmetric horizontal offsets + cardinal axes
     const candidateAngles = new Set<number>([0, 90, 180, 270]);
     for (let a = 0; a < 360; a += step) {
       candidateAngles.add(a);
+    }
+    for (let offset = step; offset < 90; offset += step) {
+      candidateAngles.add(offset);
+      candidateAngles.add(180 - offset);
+      candidateAngles.add(180 + offset);
+      candidateAngles.add(360 - offset);
     }
 
     let bestAngleDeg = 0;
@@ -953,9 +1034,13 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     });
 
     const rad = (bestAngleDeg * Math.PI) / 180;
+    const exactXMm = Number((anchorXMm + snappedLengthMm * Math.cos(rad)).toFixed(4));
+    const exactYMm = Number((anchorYMm + snappedLengthMm * Math.sin(rad)).toFixed(4));
+
     return {
-      xMm: formatMm(anchorXMm + lengthMm * Math.cos(rad), 2),
-      yMm: formatMm(anchorYMm + lengthMm * Math.sin(rad), 2),
+      xMm: exactXMm,
+      yMm: exactYMm,
+      lengthMm: snappedLengthMm,
       angleDeg: bestAngleDeg,
     };
   };
@@ -1017,17 +1102,16 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
               positionMm: nextPosMm,
             },
           ];
+      recordDragHistoryOnce();
       onUpdateGuidelines(updated, false);
       return;
     }
 
-    if (!interaction) return;
-
-    if (interaction.mode === 'moving-multi') {
-      const dxMm = ptMm.x - interaction.startMmX;
-      const dyMm = ptMm.y - interaction.startMmY;
-      const excludedIds = interaction.initialObjects.map((o) => o.id);
-      const initialBounds = getCombinedBoundsMm(interaction.initialObjects);
+    if (currentInteraction.mode === 'moving-multi') {
+      const dxMm = ptMm.x - currentInteraction.startMmX;
+      const dyMm = ptMm.y - currentInteraction.startMmY;
+      const excludedIds = currentInteraction.initialObjects.map((o) => o.id);
+      const initialBounds = getCombinedBoundsMm(currentInteraction.initialObjects);
       const snapped = snapBoxPositionMm(
         initialBounds.xMm + dxMm,
         initialBounds.yMm + dyMm,
@@ -1041,22 +1125,34 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       });
       const actualDx = snapped.xMm - initialBounds.xMm;
       const actualDy = snapped.yMm - initialBounds.yMm;
-      const movedList = interaction.initialObjects.map((initObj) =>
+      if (Math.abs(actualDx) < 0.01 && Math.abs(actualDy) < 0.01 && !currentInteraction.hasMoved) {
+        return;
+      }
+      recordDragHistoryOnce();
+      const movedList = currentInteraction.initialObjects.map((initObj) =>
         initObj.locked ? initObj : translatePageObjectMm(initObj, actualDx, actualDy)
       );
       onUpdateMultipleObjects(movedList, false);
-      if (!interaction.hasMoved) {
-        setInteraction({ ...interaction, hasMoved: true });
+      if (!currentInteraction.hasMoved) {
+        setInteraction({ ...currentInteraction, hasMoved: true });
       }
       return;
     }
 
-    if (interaction.mode === 'moving-object') {
-      const dxMm = ptMm.x - interaction.startMmX;
-      const dyMm = ptMm.y - interaction.startMmY;
-      const init = interaction.initialObject;
+    if (currentInteraction.mode === 'moving-object') {
+      const dxMm = ptMm.x - currentInteraction.startMmX;
+      const dyMm = ptMm.y - currentInteraction.startMmY;
+      const init = !currentInteraction.hasMoved
+        ? page.objects.find((o) => o.id === currentInteraction.objectId) ??
+          currentInteraction.initialObject
+        : currentInteraction.initialObject;
 
       if (init.locked) return;
+      if (Math.abs(dxMm) < 0.01 && Math.abs(dyMm) < 0.01 && !currentInteraction.hasMoved) {
+        return;
+      }
+
+      recordDragHistoryOnce();
 
       if (init.type === 'line' || init.type === 'arrow' || init.type === 'dimension') {
         const initBounds = getObjectBoundsMm(init);
@@ -1117,21 +1213,28 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           false
         );
       }
-      if (!interaction.hasMoved) {
-        setInteraction({ ...interaction, hasMoved: true });
+      if (!currentInteraction.hasMoved) {
+        setInteraction({
+          ...currentInteraction,
+          initialObject: init,
+          hasMoved: true,
+        });
       }
       return;
     }
 
-    if (interaction.mode === 'dragging-endpoint') {
-      const init = interaction.initialObject;
+    if (currentInteraction.mode === 'dragging-endpoint') {
+      const init = currentInteraction.initialObject;
       if (init.locked) return;
 
+      const anchorX = currentInteraction.endpoint === 'p1' ? init.x2Mm : init.x1Mm;
+      const anchorY = currentInteraction.endpoint === 'p1' ? init.y2Mm : init.y1Mm;
+
+      recordDragHistoryOnce();
+
       if (isPrecisionActive) {
-        // Angle constraint takes strict precedence over magnetic position snapping
+        // Angle and 1 mm length constraints take strict precedence over magnetic position snapping
         setActiveSnapLines({ verticalMm: null, horizontalMm: null });
-        const anchorX = interaction.endpoint === 'p1' ? init.x2Mm : init.x1Mm;
-        const anchorY = interaction.endpoint === 'p1' ? init.y2Mm : init.y1Mm;
         const constrained = constrainLineEndpointByAngleMm(
           anchorX,
           anchorY,
@@ -1140,7 +1243,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           angleStepDeg
         );
         const updated =
-          interaction.endpoint === 'p1'
+          currentInteraction.endpoint === 'p1'
             ? syncLinearBoundingBox({
                 ...init,
                 x1Mm: constrained.xMm,
@@ -1151,6 +1254,15 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                 x2Mm: constrained.xMm,
                 y2Mm: constrained.yMm,
               });
+        setInteraction({
+          ...currentInteraction,
+          anchorMmX: anchorX,
+          anchorMmY: anchorY,
+          currentMmX: constrained.xMm,
+          currentMmY: constrained.yMm,
+          constrainedLengthMm: constrained.lengthMm,
+          constrainedAngleDeg: constrained.angleDeg,
+        });
         onUpdateObject(updated, false);
         return;
       }
@@ -1162,8 +1274,24 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
         horizontalMm: snapY.snapLineMm,
       });
 
+      const freeLengthMm = formatMm(
+        getLineLengthMm(anchorX, anchorY, snapX.snappedMm, snapY.snappedMm),
+        1
+      );
+      const freeAngleDeg =
+        freeLengthMm > 0
+          ? formatMm(
+              ((((Math.atan2(snapY.snappedMm - anchorY, snapX.snappedMm - anchorX) * 180) /
+                Math.PI) %
+                360) +
+                360) %
+                360,
+              1
+            )
+          : 0;
+
       const updated =
-        interaction.endpoint === 'p1'
+        currentInteraction.endpoint === 'p1'
           ? syncLinearBoundingBox({
               ...init,
               x1Mm: snapX.snappedMm,
@@ -1174,16 +1302,25 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
               x2Mm: snapX.snappedMm,
               y2Mm: snapY.snappedMm,
             });
+      setInteraction({
+        ...currentInteraction,
+        anchorMmX: anchorX,
+        anchorMmY: anchorY,
+        currentMmX: snapX.snappedMm,
+        currentMmY: snapY.snappedMm,
+        constrainedLengthMm: freeLengthMm,
+        constrainedAngleDeg: freeAngleDeg,
+      });
       onUpdateObject(updated, false);
       return;
     }
 
-    if (interaction.mode === 'rotating-object') {
-      const init = interaction.initialObject;
+    if (currentInteraction.mode === 'rotating-object') {
+      const init = currentInteraction.initialObject;
       if (init.locked) return;
       const angleRad = Math.atan2(
-        ptMm.y - interaction.centerMmY,
-        ptMm.x - interaction.centerMmX
+        ptMm.y - currentInteraction.centerMmY,
+        ptMm.x - currentInteraction.centerMmX
       );
       let deg = (angleRad * 180) / Math.PI + 90;
       deg = ((deg % 360) + 360) % 360;
@@ -1192,6 +1329,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       } else {
         deg = Math.round(deg) % 360;
       }
+      recordDragHistoryOnce();
       if (init.type === 'group') {
         onUpdateObject(rotateGroupObjectMm(init, deg), false);
       } else {
@@ -1200,13 +1338,13 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       return;
     }
 
-    if (interaction.mode === 'resizing-object') {
-      const init = interaction.initialObject;
+    if (currentInteraction.mode === 'resizing-object') {
+      const init = currentInteraction.initialObject;
       if (init.locked) return;
 
-      const dxMm = ptMm.x - interaction.startMmX;
-      const dyMm = ptMm.y - interaction.startMmY;
-      const h = interaction.handle;
+      const dxMm = ptMm.x - currentInteraction.startMmX;
+      const dyMm = ptMm.y - currentInteraction.startMmY;
+      const h = currentInteraction.handle;
 
       let newX = init.xMm;
       let newY = init.yMm;
@@ -1261,6 +1399,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
         }
       }
 
+      recordDragHistoryOnce();
       if (init.type === 'group') {
         onUpdateObject(
           resizeGroupObjectMm(
@@ -1287,11 +1426,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       return;
     }
 
-    if (interaction.mode === 'cropping-image') {
-      const init = interaction.initialObject;
-      const dxMm = ptMm.x - interaction.startMmX;
-      const dyMm = ptMm.y - interaction.startMmY;
-      const h = interaction.handle;
+    if (currentInteraction.mode === 'cropping-image') {
+      const init = currentInteraction.initialObject;
+      const dxMm = ptMm.x - currentInteraction.startMmX;
+      const dyMm = ptMm.y - currentInteraction.startMmY;
+      const h = currentInteraction.handle;
 
       const fullW = init.widthMm / Math.max(0.01, init.crop.width);
       const fullH = init.heightMm / Math.max(0.01, init.crop.height);
@@ -1333,6 +1472,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
         height: Math.max(0.05, Math.min(1, nextH / fullH)),
       };
 
+      recordDragHistoryOnce();
       onUpdateObject(
         {
           ...init,
@@ -1347,40 +1487,75 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       return;
     }
 
-    if (interaction.mode === 'creating-object') {
+    if (currentInteraction.mode === 'creating-object') {
       const isLinearTool =
-        interaction.tool === 'line' ||
-        interaction.tool === 'arrow' ||
-        interaction.tool === 'dimension';
+        currentInteraction.tool === 'line' ||
+        currentInteraction.tool === 'arrow' ||
+        currentInteraction.tool === 'dimension';
 
       if (isLinearTool && isPrecisionActive) {
-        // Angle constraint takes strict precedence over magnetic position snapping
+        // Snap start point to nearest whole 1 mm, snap length to 1 mm, and snap angle to configured increment
         setActiveSnapLines({ verticalMm: null, horizontalMm: null });
+        const snappedStartX = Math.round(currentInteraction.rawStartMmX);
+        const snappedStartY = Math.round(currentInteraction.rawStartMmY);
         const constrained = constrainLineEndpointByAngleMm(
-          interaction.startMmX,
-          interaction.startMmY,
+          snappedStartX,
+          snappedStartY,
           ptMm.x,
           ptMm.y,
           angleStepDeg
         );
         setInteraction({
-          ...interaction,
+          ...currentInteraction,
+          startMmX: snappedStartX,
+          startMmY: snappedStartY,
           currentMmX: constrained.xMm,
           currentMmY: constrained.yMm,
+          constrainedLengthMm: constrained.lengthMm,
+          constrainedAngleDeg: constrained.angleDeg,
         });
         return;
       }
 
+      const activeStartX = currentInteraction.rawStartMmX;
+      const activeStartY = currentInteraction.rawStartMmY;
       const snapX = snapCoordinateMm(ptMm.x, 'x');
       const snapY = snapCoordinateMm(ptMm.y, 'y');
       setActiveSnapLines({
         verticalMm: snapX.snapLineMm,
         horizontalMm: snapY.snapLineMm,
       });
+
+      const freeLengthMm = isLinearTool
+        ? formatMm(
+            getLineLengthMm(activeStartX, activeStartY, snapX.snappedMm, snapY.snappedMm),
+            1
+          )
+        : 0;
+      const freeAngleDeg =
+        isLinearTool && freeLengthMm > 0
+          ? formatMm(
+              ((((Math.atan2(
+                snapY.snappedMm - activeStartY,
+                snapX.snappedMm - activeStartX
+              ) *
+                180) /
+                Math.PI) %
+                360) +
+                360) %
+                360,
+              1
+            )
+          : 0;
+
       setInteraction({
-        ...interaction,
+        ...currentInteraction,
+        startMmX: activeStartX,
+        startMmY: activeStartY,
         currentMmX: snapX.snappedMm,
         currentMmY: snapY.snappedMm,
+        constrainedLengthMm: freeLengthMm,
+        constrainedAngleDeg: freeAngleDeg,
       });
     }
   };
@@ -1581,11 +1756,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           ? posMm < 0 || posMm > doc.widthMm
           : posMm < 0 || posMm > doc.heightMm;
       if (isOutOfBounds) {
+        recordDragHistoryOnce();
         onUpdateGuidelines(
           page.guidelines.filter((item) => item.id !== currentInteraction.guideId),
-          true
+          false
         );
-      } else {
+      } else if (hasRecordedDragHistoryRef.current) {
         const exists = page.guidelines.some((g) => g.id === currentInteraction.guideId);
         const finalGuides = exists
           ? page.guidelines.map((g) =>
@@ -1599,54 +1775,44 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                 positionMm: posMm,
               },
             ];
-        onUpdateGuidelines(finalGuides, true);
-      }
-      setInteraction(null);
-      return;
-    }
-
-    if (!interaction) {
-      setInteraction(null);
-      return;
-    }
-
-    if (interaction.mode === 'moving-multi') {
-      if (interaction.hasMoved) {
-        const ids = new Set(interaction.initialObjects.map((o) => o.id));
-        const currentObjs = page.objects.filter((o) => ids.has(o.id));
-        if (currentObjs.length > 0) {
-          onUpdateMultipleObjects(currentObjs, true);
-        }
+        onUpdateGuidelines(finalGuides, false);
       }
       setInteraction(null);
       return;
     }
 
     if (
-      interaction.mode === 'moving-object' ||
-      interaction.mode === 'resizing-object' ||
-      interaction.mode === 'rotating-object' ||
-      interaction.mode === 'dragging-endpoint' ||
-      interaction.mode === 'cropping-image'
+      currentInteraction.mode === 'moving-multi' ||
+      currentInteraction.mode === 'moving-object' ||
+      currentInteraction.mode === 'resizing-object' ||
+      currentInteraction.mode === 'rotating-object' ||
+      currentInteraction.mode === 'dragging-endpoint' ||
+      currentInteraction.mode === 'cropping-image'
     ) {
-      const currentObj = page.objects.find((o) => o.id === interaction.objectId);
-      if (currentObj) {
-        onUpdateObject(currentObj, true);
-      }
+      // Pre-drag history snapshot was already recorded on the first move frame via recordDragHistoryOnce()
+      // and live coordinates were committed during processPointerMove.
       setInteraction(null);
       return;
     }
 
-    if (interaction.mode === 'creating-object') {
-      const { tool, startMmX, startMmY, currentMmX, currentMmY } = interaction;
+    if (currentInteraction.mode === 'creating-object') {
+      const { tool, startMmX, startMmY, currentMmX, currentMmY } = currentInteraction;
       setInteraction(null);
 
       const sheetScale = Math.max(0.35, doc.widthMm / 1189);
+      const isPrecisionActive = Boolean(isShiftPressedRef.current || doc.precisionMode);
 
       if (tool === 'line' || tool === 'arrow' || tool === 'dimension') {
         const dist = getLineLengthMm(startMmX, startMmY, currentMmX, currentMmY);
-        const endX = dist < 3 ? formatMm(startMmX + 120 * sheetScale, 1) : currentMmX;
-        const endY = dist < 3 ? startMmY : currentMmY;
+        const minDragThresholdMm = isPrecisionActive ? 1 : 3;
+        const finalStartX = isPrecisionActive ? Math.round(startMmX) : startMmX;
+        const finalStartY = isPrecisionActive ? Math.round(startMmY) : startMmY;
+        const defaultLenMm = isPrecisionActive
+          ? Math.round(120 * sheetScale)
+          : formatMm(120 * sheetScale, 1);
+        const endX =
+          dist < minDragThresholdMm ? finalStartX + defaultLenMm : currentMmX;
+        const endY = dist < minDragThresholdMm ? finalStartY : currentMmY;
 
         if (tool === 'line') {
           const lineObj: LineObject = syncLinearBoundingBox({
@@ -1657,8 +1823,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
             yMm: 0,
             widthMm: 0,
             heightMm: 0,
-            x1Mm: startMmX,
-            y1Mm: startMmY,
+            x1Mm: finalStartX,
+            y1Mm: finalStartY,
             x2Mm: endX,
             y2Mm: endY,
             rotationDeg: 0,
@@ -1677,8 +1843,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
             yMm: 0,
             widthMm: 0,
             heightMm: 0,
-            x1Mm: startMmX,
-            y1Mm: startMmY,
+            x1Mm: finalStartX,
+            y1Mm: finalStartY,
             x2Mm: endX,
             y2Mm: endY,
             rotationDeg: 0,
@@ -1699,8 +1865,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
             yMm: 0,
             widthMm: 0,
             heightMm: 0,
-            x1Mm: startMmX,
-            y1Mm: startMmY,
+            x1Mm: finalStartX,
+            y1Mm: finalStartY,
             x2Mm: endX,
             y2Mm: endY,
             rotationDeg: 0,
@@ -1843,6 +2009,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       clientY: number,
       isAdditiveModifier = false
     ) => {
+      blurExternalInputIfFocused();
       if (isAdditiveModifier) {
         onSelectObject(obj.id, true);
         return;
@@ -2323,32 +2490,88 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
               <div
                 onPointerDown={(e) => {
                   e.stopPropagation();
+                  isShiftPressedRef.current = e.shiftKey;
+                  const initLen = formatMm(
+                    getLineLengthMm(obj.x2Mm, obj.y2Mm, obj.x1Mm, obj.y1Mm),
+                    1
+                  );
+                  const initAngle = formatMm(
+                    ((((Math.atan2(obj.y1Mm - obj.y2Mm, obj.x1Mm - obj.x2Mm) * 180) /
+                      Math.PI) %
+                      360) +
+                      360) %
+                      360,
+                    1
+                  );
                   setInteraction({
                     mode: 'dragging-endpoint',
                     objectId: obj.id,
                     endpoint: 'p1',
                     initialObject: obj,
+                    anchorMmX: obj.x2Mm,
+                    anchorMmY: obj.y2Mm,
+                    currentMmX: obj.x1Mm,
+                    currentMmY: obj.y1Mm,
+                    constrainedLengthMm: initLen,
+                    constrainedAngleDeg: initAngle,
                   });
                 }}
                 onMouseDown={(e) => {
                   e.stopPropagation();
                   if (interactionRef.current !== null) return;
+                  isShiftPressedRef.current = e.shiftKey;
+                  const initLen = formatMm(
+                    getLineLengthMm(obj.x2Mm, obj.y2Mm, obj.x1Mm, obj.y1Mm),
+                    1
+                  );
+                  const initAngle = formatMm(
+                    ((((Math.atan2(obj.y1Mm - obj.y2Mm, obj.x1Mm - obj.x2Mm) * 180) /
+                      Math.PI) %
+                      360) +
+                      360) %
+                      360,
+                    1
+                  );
                   setInteraction({
                     mode: 'dragging-endpoint',
                     objectId: obj.id,
                     endpoint: 'p1',
                     initialObject: obj,
+                    anchorMmX: obj.x2Mm,
+                    anchorMmY: obj.y2Mm,
+                    currentMmX: obj.x1Mm,
+                    currentMmY: obj.y1Mm,
+                    constrainedLengthMm: initLen,
+                    constrainedAngleDeg: initAngle,
                   });
                 }}
                 onTouchStart={(e) => {
                   if (e.touches.length !== 1) return;
                   e.stopPropagation();
                   if (interactionRef.current !== null) return;
+                  const initLen = formatMm(
+                    getLineLengthMm(obj.x2Mm, obj.y2Mm, obj.x1Mm, obj.y1Mm),
+                    1
+                  );
+                  const initAngle = formatMm(
+                    ((((Math.atan2(obj.y1Mm - obj.y2Mm, obj.x1Mm - obj.x2Mm) * 180) /
+                      Math.PI) %
+                      360) +
+                      360) %
+                      360,
+                    1
+                  );
                   setInteraction({
                     mode: 'dragging-endpoint',
                     objectId: obj.id,
                     endpoint: 'p1',
                     initialObject: obj,
+                    anchorMmX: obj.x2Mm,
+                    anchorMmY: obj.y2Mm,
+                    currentMmX: obj.x1Mm,
+                    currentMmY: obj.y1Mm,
+                    constrainedLengthMm: initLen,
+                    constrainedAngleDeg: initAngle,
                   });
                 }}
                 className="absolute bg-white rounded-full shadow-xs cursor-crosshair z-30"
@@ -2359,37 +2582,93 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   height: handleSizePagePx,
                   border: `${borderRingPagePx}px solid #2563EB`,
                 }}
-                title={`Start endpoint (${formatMm(obj.x1Mm)}, ${formatMm(obj.y1Mm)} mm)`}
+                title={`Start endpoint (${formatMm(obj.x1Mm, 2)}, ${formatMm(obj.y1Mm, 2)} mm)`}
               />
               <div
                 onPointerDown={(e) => {
                   e.stopPropagation();
+                  isShiftPressedRef.current = e.shiftKey;
+                  const initLen = formatMm(
+                    getLineLengthMm(obj.x1Mm, obj.y1Mm, obj.x2Mm, obj.y2Mm),
+                    1
+                  );
+                  const initAngle = formatMm(
+                    ((((Math.atan2(obj.y2Mm - obj.y1Mm, obj.x2Mm - obj.x1Mm) * 180) /
+                      Math.PI) %
+                      360) +
+                      360) %
+                      360,
+                    1
+                  );
                   setInteraction({
                     mode: 'dragging-endpoint',
                     objectId: obj.id,
                     endpoint: 'p2',
                     initialObject: obj,
+                    anchorMmX: obj.x1Mm,
+                    anchorMmY: obj.y1Mm,
+                    currentMmX: obj.x2Mm,
+                    currentMmY: obj.y2Mm,
+                    constrainedLengthMm: initLen,
+                    constrainedAngleDeg: initAngle,
                   });
                 }}
                 onMouseDown={(e) => {
                   e.stopPropagation();
                   if (interactionRef.current !== null) return;
+                  isShiftPressedRef.current = e.shiftKey;
+                  const initLen = formatMm(
+                    getLineLengthMm(obj.x1Mm, obj.y1Mm, obj.x2Mm, obj.y2Mm),
+                    1
+                  );
+                  const initAngle = formatMm(
+                    ((((Math.atan2(obj.y2Mm - obj.y1Mm, obj.x2Mm - obj.x1Mm) * 180) /
+                      Math.PI) %
+                      360) +
+                      360) %
+                      360,
+                    1
+                  );
                   setInteraction({
                     mode: 'dragging-endpoint',
                     objectId: obj.id,
                     endpoint: 'p2',
                     initialObject: obj,
+                    anchorMmX: obj.x1Mm,
+                    anchorMmY: obj.y1Mm,
+                    currentMmX: obj.x2Mm,
+                    currentMmY: obj.y2Mm,
+                    constrainedLengthMm: initLen,
+                    constrainedAngleDeg: initAngle,
                   });
                 }}
                 onTouchStart={(e) => {
                   if (e.touches.length !== 1) return;
                   e.stopPropagation();
                   if (interactionRef.current !== null) return;
+                  const initLen = formatMm(
+                    getLineLengthMm(obj.x1Mm, obj.y1Mm, obj.x2Mm, obj.y2Mm),
+                    1
+                  );
+                  const initAngle = formatMm(
+                    ((((Math.atan2(obj.y2Mm - obj.y1Mm, obj.x2Mm - obj.x1Mm) * 180) /
+                      Math.PI) %
+                      360) +
+                      360) %
+                      360,
+                    1
+                  );
                   setInteraction({
                     mode: 'dragging-endpoint',
                     objectId: obj.id,
                     endpoint: 'p2',
                     initialObject: obj,
+                    anchorMmX: obj.x1Mm,
+                    anchorMmY: obj.y1Mm,
+                    currentMmX: obj.x2Mm,
+                    currentMmY: obj.y2Mm,
+                    constrainedLengthMm: initLen,
+                    constrainedAngleDeg: initAngle,
                   });
                 }}
                 className="absolute bg-white rounded-full shadow-xs cursor-crosshair z-30"
@@ -2400,7 +2679,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   height: handleSizePagePx,
                   border: `${borderRingPagePx}px solid #2563EB`,
                 }}
-                title={`End endpoint (${formatMm(obj.x2Mm)}, ${formatMm(obj.y2Mm)} mm)`}
+                title={`End endpoint (${formatMm(obj.x2Mm, 2)}, ${formatMm(obj.y2Mm, 2)} mm)`}
               />
             </>
           )}
@@ -2592,9 +2871,13 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   ref={textareaRef}
                   data-allow-touch-scroll="true"
                   value={obj.text}
-                  onChange={(e) =>
-                    onUpdateObject({ ...obj, text: e.target.value }, true)
-                  }
+                  onChange={(e) => {
+                    if (!hasRecordedTextEditHistoryRef.current) {
+                      hasRecordedTextEditHistoryRef.current = true;
+                      onRecordHistorySnapshot();
+                    }
+                    onUpdateObject({ ...obj, text: e.target.value }, false);
+                  }}
                   onPointerDown={(e) => e.stopPropagation()}
                   onMouseDown={(e) => e.stopPropagation()}
                   onTouchStart={(e) => e.stopPropagation()}
@@ -2989,6 +3272,57 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                 )}
               </div>
             </>
+          );
+        })()}
+
+        {/* Live Line / Arrow / Dimension Drawing & Endpoint Readout Pill */}
+        {((interaction?.mode === 'creating-object' &&
+          (interaction.tool === 'line' ||
+            interaction.tool === 'arrow' ||
+            interaction.tool === 'dimension')) ||
+          interaction?.mode === 'dragging-endpoint') && (() => {
+          const isPrecisionActive = Boolean(
+            isShiftPressedRef.current || doc.precisionMode
+          );
+          const startX =
+            interaction.mode === 'creating-object'
+              ? interaction.startMmX
+              : interaction.anchorMmX;
+          const startY =
+            interaction.mode === 'creating-object'
+              ? interaction.startMmY
+              : interaction.anchorMmY;
+          const displayX = isPrecisionActive
+            ? Math.round(startX)
+            : formatMm(startX, 1);
+          const displayY = isPrecisionActive
+            ? Math.round(startY)
+            : formatMm(startY, 1);
+          const displayLength = isPrecisionActive
+            ? Math.round(interaction.constrainedLengthMm)
+            : formatMm(interaction.constrainedLengthMm, 1);
+          const displayAngle = isPrecisionActive
+            ? Math.round(interaction.constrainedAngleDeg)
+            : formatMm(interaction.constrainedAngleDeg, 1);
+
+          return (
+            <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-50 px-3 py-1 rounded-full shadow-lg text-xs font-mono font-semibold flex items-center gap-2 pointer-events-none whitespace-nowrap bg-slate-900 text-white border border-slate-700">
+              <span>
+                <span className="text-slate-400">X:</span> {displayX} mm
+              </span>
+              <span className="text-slate-600">|</span>
+              <span>
+                <span className="text-slate-400">Y:</span> {displayY} mm
+              </span>
+              <span className="text-slate-600">|</span>
+              <span>
+                <span className="text-emerald-400">Length:</span> {displayLength} mm
+              </span>
+              <span className="text-slate-600">|</span>
+              <span>
+                <span className="text-cyan-400">Angle:</span> {displayAngle}°
+              </span>
+            </div>
           );
         })()}
 

@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: MIT
  *
- * PageLay — Native ".lay" Document Packaging & Loading Service
+ * PageLay — Native ".lay" Document Packaging, File System Access API & Loading Service
  *
  * Native ".lay" format specification:
  * - Standard ZIP archive containing:
@@ -12,7 +12,13 @@
  */
 
 import JSZip from 'jszip';
-import { ImageAsset, PageData, PageLayDocument, PaperFormat, Orientation } from '../model/documentTypes';
+import {
+  ImageAsset,
+  PageData,
+  PageLayDocument,
+  PaperFormat,
+  Orientation,
+} from '../model/documentTypes';
 
 interface SerializedAssetMeta {
   id: string;
@@ -48,10 +54,60 @@ interface LayManifestV1 {
 }
 
 /**
+ * Runtime-only File System Access API handle interfaces.
+ * Kept strictly in application runtime state and never serialized into `.lay` files.
+ */
+export interface LayFileWritableStream {
+  write: (data: Blob | BufferSource | string) => Promise<void>;
+  close: () => Promise<void>;
+}
+
+export interface LayFileSystemHandle {
+  readonly kind?: 'file';
+  readonly name: string;
+  getFile?: () => Promise<File>;
+  createWritable: () => Promise<LayFileWritableStream>;
+  queryPermission?: (descriptor?: {
+    mode?: 'read' | 'readwrite';
+  }) => Promise<PermissionState>;
+  requestPermission?: (descriptor?: {
+    mode?: 'read' | 'readwrite';
+  }) => Promise<PermissionState>;
+}
+
+type NativeSaveFilePicker = (options?: {
+  suggestedName?: string;
+  types?: Array<{
+    description?: string;
+    accept: Record<string, string[]>;
+  }>;
+}) => Promise<LayFileSystemHandle>;
+
+type NativeOpenFilePicker = (options?: {
+  multiple?: boolean;
+  types?: Array<{
+    description?: string;
+    accept: Record<string, string[]>;
+  }>;
+}) => Promise<LayFileSystemHandle[]>;
+
+const LAY_FILE_PICKER_TYPES = [
+  {
+    description: 'PageLay Document (.lay)',
+    accept: {
+      'application/octet-stream': ['.lay'],
+      'application/zip': ['.lay'],
+    },
+  },
+];
+
+/**
  * Packages the authoritative PageLayDocument and all original untouched image bytes
  * into a downloadable `.lay` binary Blob.
  */
-export async function serializeDocumentToLayBlob(doc: PageLayDocument): Promise<Blob> {
+export async function serializeDocumentToLayBlob(
+  doc: PageLayDocument
+): Promise<Blob> {
   const zip = new JSZip();
   const serializedAssets: SerializedAssetMeta[] = [];
 
@@ -61,7 +117,10 @@ export async function serializeDocumentToLayBlob(doc: PageLayDocument): Promise<
     const zipPath = `assets/${asset.id}_${safeFilename}`;
 
     // Store raw original bytes without any alteration
-    zip.file(zipPath, asset.originalBytes, { binary: true, compression: 'DEFLATE' });
+    zip.file(zipPath, asset.originalBytes, {
+      binary: true,
+      compression: 'DEFLATE',
+    });
 
     serializedAssets.push({
       id: asset.id,
@@ -107,32 +166,355 @@ export async function serializeDocumentToLayBlob(doc: PageLayDocument): Promise<
   });
 }
 
+export interface SaveLayResult {
+  status:
+    | 'saved-native'
+    | 'download-initiated'
+    | 'cancelled'
+    | 'needs-fallback-modal'
+    | 'permission-denied';
+  documentName: string;
+  filename: string;
+  fileHandle: LayFileSystemHandle | null;
+}
+
+export interface OpenLayPickerResult {
+  status: 'opened' | 'cancelled' | 'unsupported';
+  doc?: PageLayDocument;
+  fileHandle?: LayFileSystemHandle | null;
+}
+
 /**
- * Triggers a browser file download for a `.lay` document.
+ * Normalizes a user-entered or file-derived document name by stripping any trailing `.lay` extension.
  */
-export async function saveDocumentAsLayFile(doc: PageLayDocument): Promise<void> {
-  const blob = await serializeDocumentToLayBlob(doc);
+export function normalizeDocumentName(rawName: string): string {
+  const cleaned = (rawName || '')
+    .trim()
+    .replace(/\.lay$/i, '')
+    .trim();
+  return cleaned || 'Untitled Document';
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof DOMException && err.name === 'AbortError') return true;
+  return (err as { name?: string })?.name === 'AbortError';
+}
+
+/**
+ * Verifies or requests readwrite permission on an existing FileSystemFileHandle.
+ */
+export async function ensureReadWritePermission(
+  handle: LayFileSystemHandle
+): Promise<boolean> {
+  try {
+    if (typeof handle.queryPermission === 'function') {
+      const current = await handle.queryPermission({ mode: 'readwrite' });
+      if (current === 'granted') return true;
+    }
+    if (typeof handle.requestPermission === 'function') {
+      const requested = await handle.requestPermission({ mode: 'readwrite' });
+      return requested === 'granted';
+    }
+    // If the browser handle implementation omits queryPermission/requestPermission,
+    // allow createWritable() to perform the permission check.
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Overwrites an existing `FileSystemFileHandle` in place using `createWritable()`, `write()`, and `close()`.
+ */
+export async function writeDocumentToFileHandle(
+  doc: PageLayDocument,
+  handle: LayFileSystemHandle,
+  syncNameFromHandle: boolean
+): Promise<SaveLayResult> {
+  const hasPermission = await ensureReadWritePermission(handle);
+  if (!hasPermission) {
+    return {
+      status: 'permission-denied',
+      documentName: doc.name,
+      filename: handle.name || `${normalizeDocumentName(doc.name)}.lay`,
+      fileHandle: handle,
+    };
+  }
+
+  const handleName = handle.name ? handle.name.trim() : '';
+  const finalDocName = syncNameFromHandle
+    ? normalizeDocumentName(handleName || doc.name)
+    : normalizeDocumentName(doc.name || handleName);
+  const finalFilename =
+    handleName && /\.lay$/i.test(handleName)
+      ? handleName
+      : `${finalDocName}.lay`;
+
+  const updatedDoc: PageLayDocument = {
+    ...doc,
+    name: finalDocName,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const blob = await serializeDocumentToLayBlob(updatedDoc);
+  const writable = await handle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+
+  return {
+    status: 'saved-native',
+    documentName: finalDocName,
+    filename: finalFilename,
+    fileHandle: handle,
+  };
+}
+
+/**
+ * Prompts the user with the native OS Save As file picker (`showSaveFilePicker`) if supported and permitted.
+ */
+async function promptNativeSaveFilePicker(
+  suggestedDocName: string
+): Promise<
+  | { kind: 'picked'; handle: LayFileSystemHandle }
+  | { kind: 'cancelled' }
+  | { kind: 'unsupported' }
+> {
+  const picker =
+    typeof window !== 'undefined'
+      ? (window as unknown as { showSaveFilePicker?: NativeSaveFilePicker })
+          .showSaveFilePicker
+      : undefined;
+
+  if (typeof picker !== 'function') {
+    return { kind: 'unsupported' };
+  }
+
+  const cleanSuggested = normalizeDocumentName(suggestedDocName);
+  try {
+    const handle = await picker({
+      suggestedName: `${cleanSuggested}.lay`,
+      types: LAY_FILE_PICKER_TYPES,
+    });
+    return { kind: 'picked', handle };
+  } catch (err) {
+    if (isAbortError(err)) {
+      return { kind: 'cancelled' };
+    }
+    // SecurityError or cross-origin iframe restriction
+    return { kind: 'unsupported' };
+  }
+}
+
+/**
+ * Standard **Save** (`Ctrl/Cmd+S`) workflow:
+ * 1. If `existingHandle` is present, writes directly to that file handle with `createWritable()`,
+ *    `write()`, and `close()` without opening a Save As dialog or creating duplicate downloads.
+ * 2. If `existingHandle` is null (document has never been saved or was opened without a writable handle),
+ *    prompts the user via `showSaveFilePicker` once, writes the file, and returns the new handle.
+ * 3. If native file handles are unsupported/blocked in the current browser environment,
+ *    returns `status: 'needs-fallback-modal'` so the application can present the fallback Save dialog.
+ */
+export async function saveDocumentToExistingOrNewHandle(
+  doc: PageLayDocument,
+  existingHandle: LayFileSystemHandle | null
+): Promise<SaveLayResult> {
+  if (existingHandle) {
+    try {
+      return await writeDocumentToFileHandle(doc, existingHandle, false);
+    } catch (err) {
+      if (isAbortError(err)) {
+        return {
+          status: 'cancelled',
+          documentName: doc.name,
+          filename: existingHandle.name,
+          fileHandle: existingHandle,
+        };
+      }
+      throw err;
+    }
+  }
+
+  const picked = await promptNativeSaveFilePicker(doc.name);
+  if (picked.kind === 'cancelled') {
+    return {
+      status: 'cancelled',
+      documentName: doc.name,
+      filename: '',
+      fileHandle: null,
+    };
+  }
+  if (picked.kind === 'picked') {
+    return await writeDocumentToFileHandle(doc, picked.handle, true);
+  }
+
+  return {
+    status: 'needs-fallback-modal',
+    documentName: doc.name,
+    filename: '',
+    fileHandle: null,
+  };
+}
+
+/**
+ * **Save As...** (`Ctrl/Cmd+Shift+S`) workflow:
+ * - Always prompts the user to choose a new filename or location.
+ * - When `showSaveFilePicker` is supported and permitted, opens the native Save As dialog directly,
+ *   writes the file, updates the internal `.lay` manifest name, and returns the new `fileHandle`.
+ * - If cancelled, preserves `previousHandle` and returns `status: 'cancelled'`.
+ * - When native file handles are unavailable/blocked, returns `status: 'needs-fallback-modal'` so
+ *   the application can open its filename modal for the browser download fallback.
+ */
+export async function saveDocumentAsWithNativePicker(
+  doc: PageLayDocument,
+  previousHandle: LayFileSystemHandle | null
+): Promise<SaveLayResult> {
+  const picked = await promptNativeSaveFilePicker(doc.name);
+  if (picked.kind === 'cancelled') {
+    return {
+      status: 'cancelled',
+      documentName: doc.name,
+      filename: previousHandle?.name || '',
+      fileHandle: previousHandle,
+    };
+  }
+  if (picked.kind === 'picked') {
+    return await writeDocumentToFileHandle(doc, picked.handle, true);
+  }
+
+  return {
+    status: 'needs-fallback-modal',
+    documentName: doc.name,
+    filename: previousHandle?.name || '',
+    fileHandle: previousHandle,
+  };
+}
+
+/**
+ * Triggers a browser file download fallback for environments where the File System Access API
+ * is unavailable or blocked. Does NOT claim to overwrite an existing disk file.
+ */
+export async function saveDocumentAsLayFile(
+  doc: PageLayDocument,
+  overrideName?: string
+): Promise<SaveLayResult> {
+  const finalDocName = normalizeDocumentName(overrideName ?? doc.name);
+  const docToSave: PageLayDocument =
+    finalDocName === doc.name ? doc : { ...doc, name: finalDocName };
+  const blob = await serializeDocumentToLayBlob(docToSave);
   const url = URL.createObjectURL(blob);
-  const safeName = (doc.name || 'document').trim().replace(/\.lay$/i, '');
+  const filename = `${finalDocName}.lay`;
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${safeName}.lay`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return {
+    status: 'download-initiated',
+    documentName: finalDocName,
+    filename,
+    fileHandle: null,
+  };
+}
+
+/**
+ * Used when the user submits the fallback `SaveAsModal`:
+ * Attempts `showSaveFilePicker` with the user-entered `requestedName` first (in case the browser
+ * supports it from the modal submit gesture), and otherwise initiates a browser download.
+ */
+export async function saveDocumentAsLayFileWithPicker(
+  doc: PageLayDocument,
+  requestedName: string,
+  previousHandle: LayFileSystemHandle | null = null
+): Promise<SaveLayResult> {
+  const cleanRequestedName = normalizeDocumentName(requestedName);
+  const picked = await promptNativeSaveFilePicker(cleanRequestedName);
+  if (picked.kind === 'cancelled') {
+    return {
+      status: 'cancelled',
+      documentName: doc.name,
+      filename: previousHandle?.name || '',
+      fileHandle: previousHandle,
+    };
+  }
+  if (picked.kind === 'picked') {
+    const docWithRequested: PageLayDocument = {
+      ...doc,
+      name: cleanRequestedName,
+    };
+    return await writeDocumentToFileHandle(
+      docWithRequested,
+      picked.handle,
+      true
+    );
+  }
+
+  return await saveDocumentAsLayFile(doc, cleanRequestedName);
+}
+
+/**
+ * Opens an existing `.lay` document using `showOpenFilePicker()` where supported and permitted,
+ * retaining the `FileSystemFileHandle` so subsequent Save operations overwrite the opened file directly.
+ * Returns `{ status: 'unsupported' }` if the browser does not support `showOpenFilePicker` or blocks it,
+ * allowing the caller to fall back to `<input type="file">`.
+ */
+export async function openDocumentWithNativePicker(): Promise<OpenLayPickerResult> {
+  const picker =
+    typeof window !== 'undefined'
+      ? (window as unknown as { showOpenFilePicker?: NativeOpenFilePicker })
+          .showOpenFilePicker
+      : undefined;
+
+  if (typeof picker !== 'function') {
+    return { status: 'unsupported' };
+  }
+
+  let handles: LayFileSystemHandle[];
+  try {
+    handles = await picker({
+      multiple: false,
+      types: LAY_FILE_PICKER_TYPES,
+    });
+  } catch (err) {
+    if (isAbortError(err)) {
+      return { status: 'cancelled' };
+    }
+    // SecurityError (e.g. cross-origin iframe) or unsupported environment
+    return { status: 'unsupported' };
+  }
+
+  const handle = handles?.[0];
+  if (!handle || typeof handle.getFile !== 'function') {
+    return { status: 'cancelled' };
+  }
+
+  const file = await handle.getFile();
+  const doc = await loadDocumentFromLayFile(file);
+  return {
+    status: 'opened',
+    doc,
+    fileHandle: handle,
+  };
 }
 
 /**
  * Reads and validates a `.lay` file from a browser File or Blob,
  * restoring all original image bytes and editable objects.
+ * If the opened File's actual filename differs from the internal manifest name,
+ * adopts the file's base name so the user never continues working under a stale name.
  */
-export async function loadDocumentFromLayFile(file: File | Blob): Promise<PageLayDocument> {
+export async function loadDocumentFromLayFile(
+  file: File | Blob
+): Promise<PageLayDocument> {
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(file);
   } catch {
-    throw new Error('Invalid or corrupted .lay file: archive could not be unpacked.');
+    throw new Error(
+      'Invalid or corrupted .lay file: archive could not be unpacked.'
+    );
   }
 
   const manifestEntry = zip.file('manifest.json');
@@ -145,11 +527,15 @@ export async function loadDocumentFromLayFile(file: File | Blob): Promise<PageLa
     const manifestText = await manifestEntry.async('string');
     manifest = JSON.parse(manifestText) as LayManifestV1;
   } catch {
-    throw new Error('Invalid .lay file: manifest.json contains malformed JSON.');
+    throw new Error(
+      'Invalid .lay file: manifest.json contains malformed JSON.'
+    );
   }
 
   if (manifest.format !== 'PageLay' || !Array.isArray(manifest.pages)) {
-    throw new Error('Unsupported .lay file: missing PageLay format header or pages list.');
+    throw new Error(
+      'Unsupported .lay file: missing PageLay format header or pages list.'
+    );
   }
 
   const assetsRecord: Record<string, ImageAsset> = {};
@@ -157,10 +543,14 @@ export async function loadDocumentFromLayFile(file: File | Blob): Promise<PageLa
   for (const meta of manifest.assets || []) {
     const assetEntry = zip.file(meta.zipPath);
     if (!assetEntry) {
-      throw new Error(`Missing embedded image asset "${meta.filename}" in .lay file.`);
+      throw new Error(
+        `Missing embedded image asset "${meta.filename}" in .lay file.`
+      );
     }
     const originalBytes = await assetEntry.async('uint8array');
-    const blob = new Blob([originalBytes as unknown as BlobPart], { type: meta.mimeType });
+    const blob = new Blob([originalBytes as unknown as BlobPart], {
+      type: meta.mimeType,
+    });
     const objectUrl = URL.createObjectURL(blob);
 
     assetsRecord[meta.id] = {
@@ -175,9 +565,14 @@ export async function loadDocumentFromLayFile(file: File | Blob): Promise<PageLa
     };
   }
 
+  const fileBaseName =
+    file instanceof File && file.name ? normalizeDocumentName(file.name) : '';
+  const manifestName = manifest.name ? normalizeDocumentName(manifest.name) : '';
+  const resolvedDocName = fileBaseName || manifestName || 'Untitled Document';
+
   return {
     id: manifest.id || `doc_${Date.now()}`,
-    name: manifest.name || 'Untitled Document',
+    name: resolvedDocName,
     version: manifest.version || '1.0.0',
     createdAt: manifest.createdAt || new Date().toISOString(),
     updatedAt: manifest.updatedAt || new Date().toISOString(),
@@ -213,27 +608,40 @@ export async function importImageFileToAsset(file: File): Promise<ImageAsset> {
     else if (ext === 'png') mimeType = 'image/png';
     else if (ext === 'webp') mimeType = 'image/webp';
     else {
-      throw new Error(`Unsupported image format "${file.name}". Please upload JPEG, PNG, or WebP.`);
+      throw new Error(
+        `Unsupported image format "${file.name}". Please upload JPEG, PNG, or WebP.`
+      );
     }
   }
 
   const arrayBuffer = await file.arrayBuffer();
   const originalBytes = new Uint8Array(arrayBuffer);
-  const blob = new Blob([originalBytes as unknown as BlobPart], { type: mimeType });
+  const blob = new Blob([originalBytes as unknown as BlobPart], {
+    type: mimeType,
+  });
   const objectUrl = URL.createObjectURL(blob);
 
-  const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    img.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error(`Failed to decode image "${file.name}". The file may be corrupted.`));
-    };
-    img.src = objectUrl;
-  });
+  const dimensions = await new Promise<{ width: number; height: number }>(
+    (resolve, reject) => {
+      const img = new Image();
+      img.onload = () =>
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(
+          new Error(
+            `Failed to decode image "${file.name}". The file may be corrupted.`
+          )
+        );
+      };
+      img.src = objectUrl;
+    }
+  );
 
   return {
-    id: `asset_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    id: `asset_${Date.now().toString(36)}_${Math.random()
+      .toString(36)
+      .slice(2, 7)}`,
     filename: file.name,
     mimeType,
     originalBytes,

@@ -615,3 +615,156 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     </div>
   );
 };
+
+interface SaveAsModalProps {
+  isOpen: boolean;
+  currentName: string;
+  onClose: () => void;
+  onConfirmSaveAs: (newName: string) => Promise<void> | void;
+}
+
+export const SaveAsModal: React.FC<SaveAsModalProps> = ({
+  isOpen,
+  currentName,
+  onClose,
+  onConfirmSaveAs,
+}) => {
+  const [nameInput, setNameInput] = useState(currentName);
+  const [isSaving, setIsSaving] = useState(false);
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      setNameInput(currentName);
+      setIsSaving(false);
+      setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 20);
+    }
+  }, [isOpen, currentName]);
+
+  if (!isOpen) return null;
+
+  const cleanPreviewName =
+    nameInput
+      .trim()
+      .replace(/\.lay$/i, '')
+      .trim() || 'Untitled Document';
+
+  const handleSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (isSaving) return;
+    const trimmed = nameInput
+      .trim()
+      .replace(/\.lay$/i, '')
+      .trim();
+    if (!trimmed) return;
+    setIsSaving(true);
+    try {
+      await onConfirmSaveAs(trimmed);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+      <form
+        onSubmit={handleSubmit}
+        className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-md overflow-hidden"
+      >
+        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
+          <h2 className="text-sm font-bold text-slate-900">Save Document As (.lay)</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 text-slate-400 hover:text-slate-700 rounded"
+            aria-label="Cancel Save As"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3.5 text-xs">
+          <div>
+            <label
+              htmlFor="save-as-doc-name"
+              className="block font-semibold text-slate-700 mb-1"
+            >
+              Document Name
+            </label>
+            <div className="flex items-center gap-1.5">
+              <input
+                id="save-as-doc-name"
+                ref={inputRef}
+                type="text"
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    onClose();
+                  }
+                }}
+                placeholder="Enter document name"
+                className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white"
+              />
+              <span className="px-2.5 py-2 bg-slate-100 border border-slate-200 rounded-lg font-mono text-xs text-slate-600 select-none">
+                .lay
+              </span>
+            </div>
+          </div>
+
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Exported File:</span>
+              <span className="font-mono font-semibold text-slate-900 truncate max-w-[220px]">
+                {cleanPreviewName}.lay
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Internal Manifest Title:</span>
+              <span className="font-mono font-medium text-slate-800 truncate max-w-[220px]">
+                {cleanPreviewName}
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-1.5 text-[11px] text-slate-500 leading-relaxed">
+            <p>
+              Updates the document title in PageLay and inside the saved{' '}
+              <span className="font-mono">.lay</span> archive so both stay in sync.
+            </p>
+            <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5">
+              Direct file overwrite is unavailable in this browser or embedded environment. Saving will download a new <span className="font-mono">.lay</span> file copy rather than overwriting an existing file on disk.
+            </p>
+          </div>
+        </div>
+
+        <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200 rounded-lg"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={isSaving || !nameInput.trim().replace(/\.lay$/i, '').trim()}
+            className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-40 rounded-lg flex items-center gap-1.5"
+          >
+            {isSaving ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Download className="w-3.5 h-3.5" />
+            )}
+            <span>Save .lay</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+

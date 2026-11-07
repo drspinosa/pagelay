@@ -16,8 +16,8 @@ All operations run locally in your browser with zero external cloud dependencies
 - **Interactive Millimetre Rulers & Guidelines**: Top and left rulers adapt tick intervals (`1 mm` to `100 mm`) dynamically with zoom. Drag horizontal or vertical non-printing guidelines directly onto the page (`Shift + Drag` constrains movement to exact `1 mm` increments), click any guideline or its entry in the Properties Panel to edit its exact decimal `X` or `Y` coordinate (`0.1 mm`+ precision), or generate 1-click page margin guides (`20 mm` / `40 mm`).
 - **Magnetic Snapping, Configurable Angle Snapping & Precision Mode**:
   - **Magnetic Snapping**: Snap objects and endpoints to guidelines, physical page edges/centers, and the edges or centers of other objects with live visual snap-line indicators and a quick **Snap Objects** toggle.
-  - **Configurable Angle Snapping (`1°`–`45°`)**: Choose quick presets (`1°`, `5°`, `10°`, `15°`, `30°`, `45°`) or enter any custom whole-number increment (`1°`–`45°`, default `15°`) in the **Guides & Snap** menu. Holding `Shift` during object rotation or while drawing/adjusting Lines, Arrows, and Dimensions constrains the angle to the selected increment (plus exact horizontal/vertical axes).
-  - **Touch Precision Mode**: Optional toggle in the **Guides & Snap** menu that enables `1 mm` guideline snapping, angle-constrained line/arrow/dimension drawing, and angle-constrained rotation on phones and tablets without needing a physical `Shift` key.
+  - **Configurable Angle Snapping (`1°`–`45°`) & `1 mm` Linear Precision**: Choose quick presets (`1°`, `5°`, `10°`, `15°`, `30°`, `45°`) or enter any custom whole-number increment (`1°`–`45°`, default `15°`) in the **Guides & Snap** menu. Holding `Shift` (or enabling **Precision Mode**) while drawing or adjusting Lines, Arrows, and Dimensions snaps the starting point to the nearest `1 mm`, constrains the physical length to whole `1 mm` increments, and snaps the angle to the chosen increment (`X: 100 mm | Y: 50 mm | Length: 120 mm | Angle: 10°`).
+  - **Touch Precision Mode**: Optional toggle in the **Guides & Snap** menu that enables `1 mm` guideline snapping, `1 mm` start/length + angle-constrained line/arrow/dimension drawing, and angle-constrained rotation on phones and tablets without needing a physical `Shift` key.
 
 ### 2. Lossless Image Handling & Non-Destructive Cropping
 - **Zero Re-encoding on Import**: Uploaded JPEG, PNG, and WebP images are stored in memory as untouched binary bytes (`Uint8Array`).
@@ -27,9 +27,9 @@ All operations run locally in your browser with zero external cloud dependencies
 ### 3. Rich Layout & Annotation Tools
 - **Text Boxes**: Multi-line text boxes with font family selection (PDF-guaranteed standard fonts + system fonts), point size (`pt`), bold/italic/underline, alignment, text colour, fill colour, border thickness (`mm`), and internal padding (`mm`).
 - **Technical Lines, Callout Arrows & Dimensions**:
-  - **Lines**: Solid, dashed, or dotted lines with exact `X1, Y1` and `X2, Y2` millimetre coordinates and `Shift`-constrained angle drawing/endpoint adjustment.
-  - **Callout Arrows**: Configurable arrowheads (Single `→`, Double `↔`, or Start `←`), head size in `mm`, and `Shift`-constrained angle drawing/endpoint adjustment.
-  - **Dimension Lines**: Architectural dimension lines with witness ticks, live physical document length readouts in `mm` (or custom label overrides), and `Shift`-constrained angle drawing/endpoint adjustment.
+  - **Lines**: Solid, dashed, or dotted lines with exact `X1, Y1` and `X2, Y2` millimetre coordinates and `Shift` / `Precision Mode` `1 mm` start & length + angle-constrained drawing/endpoint adjustment.
+  - **Callout Arrows**: Configurable arrowheads (Single `→`, Double `↔`, or Start `←`), head size in `mm`, and `Shift` / `Precision Mode` `1 mm` start & length + angle-constrained drawing/endpoint adjustment.
+  - **Dimension Lines**: Architectural dimension lines with witness ticks, live physical document length readouts in `mm` (or custom label overrides), and `Shift` / `Precision Mode` `1 mm` start & length + angle-constrained drawing/endpoint adjustment.
 - **Geometric Shapes & Translucent Highlights**: Rectangles, squares, ellipses, circles, triangles, and 1-click translucent highlighter overlays (Yellow, Green, Cyan, Pink).
 
 ### 4. Multi-Selection, Object Grouping, Alignment & Z-Order
@@ -39,8 +39,8 @@ All operations run locally in your browser with zero external cloud dependencies
 - **Layer Ordering, Selection & Locking**: Select All (`Ctrl/Cmd+A`), Lock/Unlock selected object(s) (`Ctrl/Cmd+L`), Fit Selection in the Status Bar, Bring to Front, Bring Forward, Send Backward, Send to Back, duplicate (`Ctrl/Cmd+D`), copy/paste (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`), and arrow-key nudging (`1 mm` or `10 mm` with `Shift`).
 - **Multi-Page Management**: Add, duplicate, reorder, and delete pages with live miniature vector/image thumbnails in the left Pages Sidebar.
 
-### 5. Native `.lay` Archive & Print-Ready Exports
-- **`.lay` Document Format**: Saves and loads the entire multi-page document as a self-contained `.lay` ZIP archive containing `manifest.json`, `document.json`, and the `/assets/` directory with the exact original binary image files.
+### 5. Native `.lay` Archive, Save As Naming & Print-Ready Exports
+- **`.lay` Document Format & Save As (`Ctrl/Cmd+Shift+S`)**: Saves and loads the entire multi-page document as a self-contained `.lay` ZIP archive containing `manifest.json`, `document.json`, and the `/assets/` directory with the exact original binary image files. **Save As...** lets you rename the document, synchronizing the exported `.lay` filename, internal `manifest.json` name, and active PageLay document title (with native File System Access API picker support where available and predictable filename resolution on reopen).
 - **Vector PDF Export (`pdf-lib`)**: Generates print-ready PDFs at exact physical millimetre dimensions (`1 mm = 72 / 25.4 pt`), embedding original JPEG/PNG image streams and rendering text, arrows, dimensions, and shapes as crisp vector graphics.
 - **High-Resolution PNG / JPG Export**: Rasterizes the current page or all pages at **72 DPI** (screen), **150 DPI** (draft print), or **300 DPI** (high-resolution print) with automatic memory-safety scaling on large formats.
 

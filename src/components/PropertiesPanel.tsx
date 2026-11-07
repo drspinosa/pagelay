@@ -8,7 +8,7 @@
  * or Document & Page Setup when no object is selected.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlignLeft,
   AlignCenter,
@@ -107,6 +107,141 @@ const QUICK_SWATCHES = [
   '#FACC15',
 ];
 
+interface NumericPropertyInputProps {
+  value: number;
+  onCommit: (nextValue: number) => void;
+  min?: number;
+  max?: number;
+  precision?: number;
+  allowNegative?: boolean;
+  normalizeOnCommit?: (val: number) => number;
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
+}
+
+/**
+ * Controlled numeric property field that buffers keystrokes locally (including intermediate
+ * decimal input such as "72." or "-") and commits a single undoable change on Enter or blur.
+ * Pressing Escape cancels the edit and restores the original pre-edit value without recording history.
+ */
+const NumericPropertyInput: React.FC<NumericPropertyInputProps> = ({
+  value,
+  onCommit,
+  min,
+  max,
+  precision = 2,
+  allowNegative = true,
+  normalizeOnCommit,
+  disabled = false,
+  className = '',
+  ariaLabel,
+}) => {
+  const normalizedPropValue = useMemo(
+    () => formatMm(value, precision),
+    [value, precision]
+  );
+
+  const [draftText, setDraftText] = useState<string>(() => String(normalizedPropValue));
+  const originalValueRef = useRef<number>(normalizedPropValue);
+  const cancelledByEscapeRef = useRef<boolean>(false);
+
+  // Sync displayed text whenever the canonical property value changes externally (Undo/Redo, drag, selection change)
+  useEffect(() => {
+    originalValueRef.current = normalizedPropValue;
+    setDraftText(String(normalizedPropValue));
+  }, [normalizedPropValue]);
+
+  const commitDraftValue = (rawText: string) => {
+    const trimmed = rawText.trim();
+    const numericPattern = allowNegative
+      ? /^[+-]?(?:\d+\.?\d*|\.\d+)$/
+      : /^\+?(?:\d+\.?\d*|\.\d+)$/;
+
+    if (!numericPattern.test(trimmed)) {
+      // Incomplete or invalid input: restore original value without modifying geometry or history
+      setDraftText(String(originalValueRef.current));
+      return;
+    }
+
+    let parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) {
+      setDraftText(String(originalValueRef.current));
+      return;
+    }
+
+    if (!allowNegative && parsed < 0) {
+      parsed = 0;
+    }
+    if (min !== undefined && parsed < min) {
+      parsed = min;
+    }
+    if (max !== undefined && parsed > max) {
+      parsed = max;
+    }
+
+    let finalValue = formatMm(parsed, precision);
+    if (normalizeOnCommit) {
+      finalValue = formatMm(normalizeOnCommit(finalValue), precision);
+    }
+
+    if (Math.abs(finalValue - originalValueRef.current) < 1e-6) {
+      // Value did not change: normalize text display and do not record history
+      setDraftText(String(originalValueRef.current));
+      return;
+    }
+
+    originalValueRef.current = finalValue;
+    setDraftText(String(finalValue));
+    onCommit(finalValue);
+  };
+
+  const hasUncommittedDraft = draftText.trim() !== String(originalValueRef.current);
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      disabled={disabled}
+      value={draftText}
+      aria-label={ariaLabel}
+      data-numeric-property="true"
+      data-has-uncommitted-draft={hasUncommittedDraft ? 'true' : 'false'}
+      onFocus={() => {
+        cancelledByEscapeRef.current = false;
+        originalValueRef.current = normalizedPropValue;
+        setDraftText(String(normalizedPropValue));
+      }}
+      onChange={(e) => {
+        setDraftText(e.target.value);
+      }}
+      onBlur={(e) => {
+        if (cancelledByEscapeRef.current) {
+          cancelledByEscapeRef.current = false;
+          setDraftText(String(originalValueRef.current));
+          return;
+        }
+        commitDraftValue(e.target.value);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();
+          commitDraftValue(e.currentTarget.value);
+          e.currentTarget.blur();
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          cancelledByEscapeRef.current = true;
+          setDraftText(String(originalValueRef.current));
+          e.currentTarget.blur();
+        }
+      }}
+      className={className}
+    />
+  );
+};
+
 export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   doc,
   activePageIndex,
@@ -137,6 +272,7 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   const [editingGuideText, setEditingGuideText] = useState<string>('');
   const [guideEditError, setGuideEditError] = useState<string | null>(null);
   const [isAlignMenuOpen, setIsAlignMenuOpen] = useState<boolean>(false);
+  const hasRecordedTextFieldHistoryRef = useRef<boolean>(false);
 
   const activePage = doc.pages[activePageIndex];
   const pageObjects = activePage ? activePage.objects : [];
@@ -498,34 +634,34 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-[11px] text-slate-500 mb-1">Width (mm)</label>
-                <input
-                  type="number"
+                <NumericPropertyInput
                   min={20}
                   max={5000}
-                  step={1}
+                  precision={2}
+                  allowNegative={false}
                   value={doc.widthMm}
-                  onChange={(e) => {
-                    const val = Math.max(20, Number(e.target.value) || 210);
+                  onCommit={(val) => {
                     const nextOrientation = val >= doc.heightMm ? 'landscape' : 'portrait';
                     onUpdateDocumentSize('Custom', nextOrientation, val, doc.heightMm);
                   }}
-                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                  ariaLabel="Document width in millimetres"
+                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600"
                 />
               </div>
               <div>
                 <label className="block text-[11px] text-slate-500 mb-1">Height (mm)</label>
-                <input
-                  type="number"
+                <NumericPropertyInput
                   min={20}
                   max={5000}
-                  step={1}
+                  precision={2}
+                  allowNegative={false}
                   value={doc.heightMm}
-                  onChange={(e) => {
-                    const val = Math.max(20, Number(e.target.value) || 297);
+                  onCommit={(val) => {
                     const nextOrientation = doc.widthMm >= val ? 'landscape' : 'portrait';
                     onUpdateDocumentSize('Custom', nextOrientation, doc.widthMm, val);
                   }}
-                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                  ariaLabel="Document height in millimetres"
+                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600"
                 />
               </div>
             </div>
@@ -988,9 +1124,17 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
           <input
             type="text"
             value={selectedObject.name}
-            onChange={(e) =>
-              onUpdateObject({ ...selectedObject, name: e.target.value })
-            }
+            onFocus={() => {
+              hasRecordedTextFieldHistoryRef.current = false;
+            }}
+            onBlur={() => {
+              hasRecordedTextFieldHistoryRef.current = false;
+            }}
+            onChange={(e) => {
+              const shouldRecord = !hasRecordedTextFieldHistoryRef.current;
+              hasRecordedTextFieldHistoryRef.current = true;
+              onUpdateObject({ ...selectedObject, name: e.target.value }, shouldRecord);
+            }}
             className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded text-xs font-medium text-slate-800 focus:outline-none focus:border-blue-600"
             placeholder="Object Label"
           />
@@ -1319,63 +1463,63 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">X Position (mm)</label>
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={formatMm(selectedObject.xMm)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val)) {
-                        if (selectedObject.type === 'group') {
-                          onUpdateObject(
-                            translatePageObjectMm(
-                              selectedObject,
-                              val - selectedObject.xMm,
-                              0
-                            )
-                          );
-                        } else {
-                          onUpdateObject({ ...selectedObject, xMm: val });
-                        }
+                  <NumericPropertyInput
+                    precision={2}
+                    allowNegative={true}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.xMm, 2)}
+                    onCommit={(val) => {
+                      if (selectedObject.type === 'group') {
+                        onUpdateObject(
+                          translatePageObjectMm(
+                            selectedObject,
+                            val - selectedObject.xMm,
+                            0
+                          ),
+                          true
+                        );
+                      } else {
+                        onUpdateObject({ ...selectedObject, xMm: val }, true);
                       }
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="X Position in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">Y Position (mm)</label>
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={formatMm(selectedObject.yMm)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val)) {
-                        if (selectedObject.type === 'group') {
-                          onUpdateObject(
-                            translatePageObjectMm(
-                              selectedObject,
-                              0,
-                              val - selectedObject.yMm
-                            )
-                          );
-                        } else {
-                          onUpdateObject({ ...selectedObject, yMm: val });
-                        }
+                  <NumericPropertyInput
+                    precision={2}
+                    allowNegative={true}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.yMm, 2)}
+                    onCommit={(val) => {
+                      if (selectedObject.type === 'group') {
+                        onUpdateObject(
+                          translatePageObjectMm(
+                            selectedObject,
+                            0,
+                            val - selectedObject.yMm
+                          ),
+                          true
+                        );
+                      } else {
+                        onUpdateObject({ ...selectedObject, yMm: val }, true);
                       }
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="Y Position in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">Width (mm)</label>
-                  <input
-                    type="number"
+                  <NumericPropertyInput
                     min={1}
-                    step={0.5}
-                    value={formatMm(selectedObject.widthMm)}
-                    onChange={(e) => {
-                      const val = Math.max(1, parseFloat(e.target.value) || 1);
+                    precision={2}
+                    allowNegative={false}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.widthMm, 2)}
+                    onCommit={(val) => {
                       if (selectedObject.type === 'group') {
                         onUpdateObject(
                           resizeGroupObjectMm(
@@ -1384,7 +1528,8 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                             selectedObject.yMm,
                             val,
                             selectedObject.heightMm
-                          )
+                          ),
+                          true
                         );
                       } else if (
                         selectedObject.type === 'image' &&
@@ -1392,36 +1537,43 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                       ) {
                         const ratio =
                           selectedObject.heightMm / Math.max(0.1, selectedObject.widthMm);
-                        onUpdateObject({
-                          ...selectedObject,
-                          widthMm: val,
-                          heightMm: formatMm(val * ratio, 2),
-                        });
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            widthMm: val,
+                            heightMm: formatMm(val * ratio, 2),
+                          },
+                          true
+                        );
                       } else if (
                         selectedObject.type === 'square' ||
                         selectedObject.type === 'circle'
                       ) {
-                        onUpdateObject({
-                          ...selectedObject,
-                          widthMm: val,
-                          heightMm: val,
-                        });
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            widthMm: val,
+                            heightMm: val,
+                          },
+                          true
+                        );
                       } else {
-                        onUpdateObject({ ...selectedObject, widthMm: val });
+                        onUpdateObject({ ...selectedObject, widthMm: val }, true);
                       }
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="Width in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">Height (mm)</label>
-                  <input
-                    type="number"
+                  <NumericPropertyInput
                     min={1}
-                    step={0.5}
-                    value={formatMm(selectedObject.heightMm)}
-                    onChange={(e) => {
-                      const val = Math.max(1, parseFloat(e.target.value) || 1);
+                    precision={2}
+                    allowNegative={false}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.heightMm, 2)}
+                    onCommit={(val) => {
                       if (selectedObject.type === 'group') {
                         onUpdateObject(
                           resizeGroupObjectMm(
@@ -1430,7 +1582,8 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                             selectedObject.yMm,
                             selectedObject.widthMm,
                             val
-                          )
+                          ),
+                          true
                         );
                       } else if (
                         selectedObject.type === 'image' &&
@@ -1438,25 +1591,32 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                       ) {
                         const ratio =
                           selectedObject.widthMm / Math.max(0.1, selectedObject.heightMm);
-                        onUpdateObject({
-                          ...selectedObject,
-                          heightMm: val,
-                          widthMm: formatMm(val * ratio, 2),
-                        });
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            heightMm: val,
+                            widthMm: formatMm(val * ratio, 2),
+                          },
+                          true
+                        );
                       } else if (
                         selectedObject.type === 'square' ||
                         selectedObject.type === 'circle'
                       ) {
-                        onUpdateObject({
-                          ...selectedObject,
-                          widthMm: val,
-                          heightMm: val,
-                        });
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            widthMm: val,
+                            heightMm: val,
+                          },
+                          true
+                        );
                       } else {
-                        onUpdateObject({ ...selectedObject, heightMm: val });
+                        onUpdateObject({ ...selectedObject, heightMm: val }, true);
                       }
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="Height in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
               </div>
@@ -1464,38 +1624,42 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">Rotation (°)</label>
-                  <input
-                    type="number"
-                    step={1}
-                    value={Math.round(selectedObject.rotationDeg)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value) || 0;
-                      const norm = ((val % 360) + 360) % 360;
+                  <NumericPropertyInput
+                    precision={1}
+                    allowNegative={true}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.rotationDeg, 1)}
+                    normalizeOnCommit={(val) => ((val % 360) + 360) % 360}
+                    onCommit={(norm) => {
                       if (selectedObject.type === 'group') {
-                        onUpdateObject(rotateGroupObjectMm(selectedObject, norm));
+                        onUpdateObject(rotateGroupObjectMm(selectedObject, norm), true);
                       } else {
-                        onUpdateObject({
-                          ...selectedObject,
-                          rotationDeg: norm,
-                        });
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            rotationDeg: norm,
+                          },
+                          true
+                        );
                       }
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="Rotation in degrees"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">Opacity (%)</label>
-                  <input
-                    type="number"
+                  <NumericPropertyInput
                     min={5}
                     max={100}
-                    step={5}
+                    precision={0}
+                    allowNegative={false}
                     value={Math.round(selectedObject.opacity * 100)}
-                    onChange={(e) => {
-                      const pct = Math.min(100, Math.max(5, Number(e.target.value) || 100));
-                      onUpdateObject({ ...selectedObject, opacity: pct / 100 });
+                    onCommit={(pct) => {
+                      onUpdateObject({ ...selectedObject, opacity: pct / 100 }, true);
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="Opacity percentage"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600"
                   />
                 </div>
               </div>
@@ -1506,79 +1670,96 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">Start X1 (mm)</label>
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={formatMm(selectedObject.x1Mm)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val)) {
-                        onUpdateObject(syncLinearBoundingBox({ ...selectedObject, x1Mm: val }));
-                      }
+                  <NumericPropertyInput
+                    precision={2}
+                    allowNegative={true}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.x1Mm, 2)}
+                    onCommit={(val) => {
+                      onUpdateObject(syncLinearBoundingBox({ ...selectedObject, x1Mm: val }), true);
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="Start X1 coordinate in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">Start Y1 (mm)</label>
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={formatMm(selectedObject.y1Mm)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val)) {
-                        onUpdateObject(syncLinearBoundingBox({ ...selectedObject, y1Mm: val }));
-                      }
+                  <NumericPropertyInput
+                    precision={2}
+                    allowNegative={true}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.y1Mm, 2)}
+                    onCommit={(val) => {
+                      onUpdateObject(syncLinearBoundingBox({ ...selectedObject, y1Mm: val }), true);
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="Start Y1 coordinate in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">End X2 (mm)</label>
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={formatMm(selectedObject.x2Mm)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val)) {
-                        onUpdateObject(syncLinearBoundingBox({ ...selectedObject, x2Mm: val }));
-                      }
+                  <NumericPropertyInput
+                    precision={2}
+                    allowNegative={true}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.x2Mm, 2)}
+                    onCommit={(val) => {
+                      onUpdateObject(syncLinearBoundingBox({ ...selectedObject, x2Mm: val }), true);
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="End X2 coordinate in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-500 mb-0.5">End Y2 (mm)</label>
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={formatMm(selectedObject.y2Mm)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val)) {
-                        onUpdateObject(syncLinearBoundingBox({ ...selectedObject, y2Mm: val }));
-                      }
+                  <NumericPropertyInput
+                    precision={2}
+                    allowNegative={true}
+                    disabled={Boolean(selectedObject.locked)}
+                    value={formatMm(selectedObject.y2Mm, 2)}
+                    onCommit={(val) => {
+                      onUpdateObject(syncLinearBoundingBox({ ...selectedObject, y2Mm: val }), true);
                     }}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                    ariaLabel="End Y2 coordinate in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600 disabled:opacity-50"
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-50 rounded border border-slate-200">
-                <span className="text-[11px] text-slate-500">Physical Length:</span>
-                <span className="font-mono font-semibold text-slate-800">
-                  {formatMm(
-                    getLineLengthMm(
-                      selectedObject.x1Mm,
-                      selectedObject.y1Mm,
-                      selectedObject.x2Mm,
-                      selectedObject.y2Mm
-                    )
-                  )}{' '}
-                  mm
-                </span>
+              <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-50 rounded border border-slate-200 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-slate-500">Length:</span>
+                  <span className="font-mono font-semibold text-slate-800">
+                    {formatMm(
+                      getLineLengthMm(
+                        selectedObject.x1Mm,
+                        selectedObject.y1Mm,
+                        selectedObject.x2Mm,
+                        selectedObject.y2Mm
+                      ),
+                      1
+                    )}{' '}
+                    mm
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-slate-500">Angle:</span>
+                  <span className="font-mono font-semibold text-slate-800">
+                    {formatMm(
+                      (((Math.atan2(
+                        selectedObject.y2Mm - selectedObject.y1Mm,
+                        selectedObject.x2Mm - selectedObject.x1Mm
+                      ) *
+                        180) /
+                        Math.PI) %
+                        360 +
+                        360) %
+                        360,
+                      1
+                    )}
+                    °
+                  </span>
+                </div>
               </div>
             </div>
           )}
@@ -1725,19 +1906,23 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               </div>
               <div>
                 <label className="block text-[11px] text-slate-500 mb-1">Border (mm)</label>
-                <input
-                  type="number"
+                <NumericPropertyInput
                   min={0}
                   max={20}
-                  step={0.2}
+                  precision={2}
+                  allowNegative={false}
                   value={selectedObject.strokeWidthMm}
-                  onChange={(e) =>
-                    onUpdateObject({
-                      ...selectedObject,
-                      strokeWidthMm: Math.max(0, parseFloat(e.target.value) || 0),
-                    })
+                  onCommit={(val) =>
+                    onUpdateObject(
+                      {
+                        ...selectedObject,
+                        strokeWidthMm: val,
+                      },
+                      true
+                    )
                   }
-                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                  ariaLabel="Image border thickness in millimetres"
+                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600"
                 />
               </div>
             </div>
@@ -1754,9 +1939,17 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               <textarea
                 rows={3}
                 value={selectedObject.text}
-                onChange={(e) =>
-                  onUpdateObject({ ...selectedObject, text: e.target.value })
-                }
+                onFocus={() => {
+                  hasRecordedTextFieldHistoryRef.current = false;
+                }}
+                onBlur={() => {
+                  hasRecordedTextFieldHistoryRef.current = false;
+                }}
+                onChange={(e) => {
+                  const shouldRecord = !hasRecordedTextFieldHistoryRef.current;
+                  hasRecordedTextFieldHistoryRef.current = true;
+                  onUpdateObject({ ...selectedObject, text: e.target.value }, shouldRecord);
+                }}
                 className="w-full p-2 bg-slate-50 border border-slate-200 rounded text-xs text-slate-800 focus:outline-none focus:border-blue-600"
                 placeholder="Enter text..."
               />
@@ -1767,7 +1960,7 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               <select
                 value={selectedObject.fontFamily}
                 onChange={(e) =>
-                  onUpdateObject({ ...selectedObject, fontFamily: e.target.value })
+                  onUpdateObject({ ...selectedObject, fontFamily: e.target.value }, true)
                 }
                 className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs text-slate-800"
               >
@@ -1802,19 +1995,23 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-[11px] text-slate-500 mb-1">Font Size (pt)</label>
-                <input
-                  type="number"
+                <NumericPropertyInput
                   min={6}
                   max={400}
-                  step={1}
+                  precision={1}
+                  allowNegative={false}
                   value={selectedObject.fontSizePt}
-                  onChange={(e) =>
-                    onUpdateObject({
-                      ...selectedObject,
-                      fontSizePt: Math.max(6, Number(e.target.value) || 16),
-                    })
+                  onCommit={(val) =>
+                    onUpdateObject(
+                      {
+                        ...selectedObject,
+                        fontSizePt: val,
+                      },
+                      true
+                    )
                   }
-                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800"
+                  ariaLabel="Font size in points"
+                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs text-slate-800 focus:outline-none focus:border-blue-600"
                 />
               </div>
 
@@ -2005,24 +2202,27 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                     }
                     className="w-7 h-7 rounded border border-slate-200 cursor-pointer shrink-0"
                   />
-                  <input
-                    type="number"
+                  <NumericPropertyInput
                     min={0}
                     max={10}
-                    step={0.2}
+                    precision={2}
+                    allowNegative={false}
                     value={selectedObject.strokeWidthMm}
-                    onChange={(e) => {
-                      const w = Math.max(0, parseFloat(e.target.value) || 0);
-                      onUpdateObject({
-                        ...selectedObject,
-                        strokeWidthMm: w,
-                        strokeColor:
-                          w > 0 && selectedObject.strokeColor === 'transparent'
-                            ? '#0F172A'
-                            : selectedObject.strokeColor,
-                      });
+                    onCommit={(w) => {
+                      onUpdateObject(
+                        {
+                          ...selectedObject,
+                          strokeWidthMm: w,
+                          strokeColor:
+                            w > 0 && selectedObject.strokeColor === 'transparent'
+                              ? '#0F172A'
+                              : selectedObject.strokeColor,
+                        },
+                        true
+                      );
                     }}
-                    className="w-full px-1.5 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs"
+                    ariaLabel="Text box border thickness in millimetres"
+                    className="w-full px-1.5 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
                   />
                 </div>
               </div>
@@ -2051,19 +2251,23 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               </div>
               <div>
                 <label className="block text-[11px] text-slate-500 mb-1">Thickness (mm)</label>
-                <input
-                  type="number"
+                <NumericPropertyInput
                   min={0.2}
                   max={25}
-                  step={0.2}
+                  precision={2}
+                  allowNegative={false}
                   value={selectedObject.strokeWidthMm}
-                  onChange={(e) =>
-                    onUpdateObject({
-                      ...selectedObject,
-                      strokeWidthMm: Math.max(0.2, parseFloat(e.target.value) || 1),
-                    })
+                  onCommit={(val) =>
+                    onUpdateObject(
+                      {
+                        ...selectedObject,
+                        strokeWidthMm: val,
+                      },
+                      true
+                    )
                   }
-                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs"
+                  ariaLabel="Line thickness in millimetres"
+                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
                 />
               </div>
             </div>
@@ -2138,19 +2342,23 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                   <label className="block text-[11px] text-slate-500 mb-1">
                     Arrowhead Size (mm)
                   </label>
-                  <input
-                    type="number"
+                  <NumericPropertyInput
                     min={2}
                     max={50}
-                    step={1}
+                    precision={2}
+                    allowNegative={false}
                     value={selectedObject.headSizeMm}
-                    onChange={(e) =>
-                      onUpdateObject({
-                        ...selectedObject,
-                        headSizeMm: Math.max(2, parseFloat(e.target.value) || 8),
-                      })
+                    onCommit={(val) =>
+                      onUpdateObject(
+                        {
+                          ...selectedObject,
+                          headSizeMm: val,
+                        },
+                        true
+                      )
                     }
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs"
+                    ariaLabel="Arrowhead size in millimetres"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
                   />
                 </div>
               </>
@@ -2165,9 +2373,20 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                   <input
                     type="text"
                     value={selectedObject.customLabel}
-                    onChange={(e) =>
-                      onUpdateObject({ ...selectedObject, customLabel: e.target.value })
-                    }
+                    onFocus={() => {
+                      hasRecordedTextFieldHistoryRef.current = false;
+                    }}
+                    onBlur={() => {
+                      hasRecordedTextFieldHistoryRef.current = false;
+                    }}
+                    onChange={(e) => {
+                      const shouldRecord = !hasRecordedTextFieldHistoryRef.current;
+                      hasRecordedTextFieldHistoryRef.current = true;
+                      onUpdateObject(
+                        { ...selectedObject, customLabel: e.target.value },
+                        shouldRecord
+                      );
+                    }}
                     placeholder={`${Math.round(
                       getLineLengthMm(
                         selectedObject.x1Mm,
@@ -2176,42 +2395,52 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                         selectedObject.y2Mm
                       )
                     )} mm`}
-                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs"
+                    className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
                   />
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[11px] text-slate-500 mb-1">Text Size (pt)</label>
-                    <input
-                      type="number"
+                    <NumericPropertyInput
                       min={8}
                       max={120}
+                      precision={1}
+                      allowNegative={false}
                       value={selectedObject.fontSizePt}
-                      onChange={(e) =>
-                        onUpdateObject({
-                          ...selectedObject,
-                          fontSizePt: Math.max(8, Number(e.target.value) || 20),
-                        })
+                      onCommit={(val) =>
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            fontSizePt: val,
+                          },
+                          true
+                        )
                       }
-                      className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs"
+                      ariaLabel="Dimension text size in points"
+                      className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
                     />
                   </div>
                   <div>
                     <label className="block text-[11px] text-slate-500 mb-1">
                       Witness Tick (mm)
                     </label>
-                    <input
-                      type="number"
+                    <NumericPropertyInput
                       min={2}
                       max={60}
+                      precision={2}
+                      allowNegative={false}
                       value={selectedObject.extensionHeightMm}
-                      onChange={(e) =>
-                        onUpdateObject({
-                          ...selectedObject,
-                          extensionHeightMm: Math.max(2, Number(e.target.value) || 10),
-                        })
+                      onCommit={(val) =>
+                        onUpdateObject(
+                          {
+                            ...selectedObject,
+                            extensionHeightMm: val,
+                          },
+                          true
+                        )
                       }
-                      className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs"
+                      ariaLabel="Witness tick height in millimetres"
+                      className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
                     />
                   </div>
                 </div>
@@ -2321,19 +2550,23 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 <label className="block text-[11px] text-slate-500 mb-1">
                   Outline Thickness (mm)
                 </label>
-                <input
-                  type="number"
+                <NumericPropertyInput
                   min={0}
                   max={25}
-                  step={0.2}
+                  precision={2}
+                  allowNegative={false}
                   value={selectedObject.strokeWidthMm}
-                  onChange={(e) =>
-                    onUpdateObject({
-                      ...selectedObject,
-                      strokeWidthMm: Math.max(0, parseFloat(e.target.value) || 0),
-                    })
+                  onCommit={(val) =>
+                    onUpdateObject(
+                      {
+                        ...selectedObject,
+                        strokeWidthMm: val,
+                      },
+                      true
+                    )
                   }
-                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs"
+                  ariaLabel="Shape outline thickness in millimetres"
+                  className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded font-mono text-xs focus:outline-none focus:border-blue-600"
                 />
               </div>
 

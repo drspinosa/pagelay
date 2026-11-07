@@ -58,7 +58,9 @@ interface TopToolbarProps {
   onRedo: () => void;
   onNewDocument: () => void;
   onOpenLayFile: (file: File) => void;
+  onTriggerOpenNativePicker?: () => Promise<boolean>;
   onSaveLayFile: () => void;
+  onSaveAsLayFile: () => void;
   onLoadSampleDocument: () => void;
   onUploadImages: (files: FileList) => void;
   showGuides: boolean;
@@ -99,7 +101,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   onRedo,
   onNewDocument,
   onOpenLayFile,
+  onTriggerOpenNativePicker,
   onSaveLayFile,
+  onSaveAsLayFile,
   onLoadSampleDocument,
   onUploadImages,
   showGuides,
@@ -274,9 +278,16 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
                 closeAllMenus();
-                layInputRef.current?.click();
+                if (onTriggerOpenNativePicker) {
+                  const useFallbackInput = await onTriggerOpenNativePicker();
+                  if (useFallbackInput) {
+                    layInputRef.current?.click();
+                  }
+                } else {
+                  layInputRef.current?.click();
+                }
               }}
               className="px-2 py-1 text-xs font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded flex items-center gap-1 transition-colors whitespace-nowrap"
               title="Open .lay Document"
@@ -292,10 +303,22 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
                 onSaveLayFile();
               }}
               className="px-2 py-1 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded flex items-center gap-1 transition-colors whitespace-nowrap"
-              title="Save Editable .lay File"
+              title="Save Editable .lay File (Ctrl+S)"
             >
               <Save className="w-3.5 h-3.5 text-slate-700" />
-              <span>Save .lay</span>
+              <span>Save</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                closeAllMenus();
+                onSaveAsLayFile();
+              }}
+              className="px-2 py-1 text-xs font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded flex items-center gap-1 transition-colors whitespace-nowrap"
+              title="Save Document As New .lay File (Ctrl+Shift+S)"
+            >
+              <span>Save As...</span>
             </button>
 
             <button
@@ -618,9 +641,16 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => {
+            onClick={async () => {
               closeAllMenus();
-              layInputRef.current?.click();
+              if (onTriggerOpenNativePicker) {
+                const useFallbackInput = await onTriggerOpenNativePicker();
+                if (useFallbackInput) {
+                  layInputRef.current?.click();
+                }
+              } else {
+                layInputRef.current?.click();
+              }
             }}
             className="w-full px-3 py-2 text-left flex items-center gap-2.5 hover:bg-slate-100 text-slate-700"
           >
@@ -637,6 +667,17 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           >
             <Save className="w-4 h-4 text-slate-700" />
             <span>Save Editable .lay File</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              closeAllMenus();
+              onSaveAsLayFile();
+            }}
+            className="w-full px-3 py-2 text-left flex items-center gap-2.5 hover:bg-slate-100 text-slate-700"
+          >
+            <Save className="w-4 h-4 text-slate-500" />
+            <span>Save As...</span>
           </button>
           <div className="my-1 border-t border-slate-100" />
           <button
@@ -889,6 +930,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
           <div className="px-3 py-1 space-y-0.5 text-[10px] text-slate-500">
             <div>Guide movement: Shift = 1 mm</div>
+            <div>Line / Arrow / Dimension: Shift = 1 mm start & length + angle snap</div>
             <div>Exact guide positions available in Properties</div>
           </div>
 

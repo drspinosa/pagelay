@@ -81,7 +81,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           ·
         </span>
         <div className="hidden md:flex items-center gap-1.5 whitespace-nowrap">
-          {isDirty ? (
+          {isDirty || !lastSavedAt ? (
             <>
               <CircleDot className="w-3.5 h-3.5 text-amber-600 shrink-0" />
               <span className="text-amber-700 font-medium">Unsaved</span>
@@ -89,9 +89,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           ) : (
             <>
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span className="text-slate-600">
-                {lastSavedAt ? `Saved (${lastSavedAt})` : 'Saved'}
-              </span>
+              <span className="text-slate-600">{`Saved (${lastSavedAt})`}</span>
             </>
           )}
         </div>
