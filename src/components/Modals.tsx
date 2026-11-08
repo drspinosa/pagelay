@@ -69,9 +69,9 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-lg max-h-[90dvh] flex flex-col overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
+    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-2 sm:p-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-lg max-h-[calc(100dvh-16px)] sm:max-h-[90dvh] flex flex-col overflow-hidden">
+        <div className="px-4 py-2.5 sm:px-5 sm:py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
           <h2 className="text-sm font-bold text-slate-900">Create New PageLay Document</h2>
           <button
             type="button"
@@ -82,14 +82,17 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
           </button>
         </div>
 
-        <div className="p-5 space-y-4 text-xs">
+        <div
+          data-allow-touch-scroll="true"
+          className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y p-3.5 sm:p-5 space-y-3 sm:space-y-4 text-xs"
+        >
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Document Name</label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-900 focus:outline-none focus:border-blue-600"
+              className="w-full px-3 py-1.5 sm:py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-900 focus:outline-none focus:border-blue-600"
             />
           </div>
 
@@ -97,7 +100,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
             <label className="block font-semibold text-slate-700 mb-1.5">
               ISO A-Series Paper Size
             </label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 sm:gap-2">
               {(['A0', 'A1', 'A2', 'A3', 'A4', 'Custom'] as const).map((fmt) => {
                 const isSelected = paperSize === fmt;
                 const spec = fmt !== 'Custom' ? ISO_PAPER_SIZES[fmt] : null;
@@ -106,7 +109,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
                     key={fmt}
                     type="button"
                     onClick={() => handleSelectFormat(fmt, orientation)}
-                    className={`p-2.5 rounded-lg border text-left transition-all ${
+                    className={`p-2 sm:p-2.5 rounded-lg border text-left transition-all ${
                       isSelected
                         ? 'border-blue-600 bg-blue-50/50 ring-1 ring-blue-600'
                         : 'border-slate-200 hover:border-slate-300 bg-slate-50/50'
@@ -126,7 +129,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Orientation</label>
               <div className="grid grid-cols-2 gap-1.5 bg-slate-100 p-1 rounded-lg">
@@ -192,7 +195,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
           </div>
 
           {/* Quick Sample Loader Callout */}
-          <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg flex items-center justify-between gap-3">
+          <div className="p-2.5 sm:p-3 bg-blue-50/70 border border-blue-200 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
             <div>
               <div className="font-semibold text-blue-950">
                 Want to test with an A0 Exhibition Stand Layout?
@@ -207,7 +210,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
                 onLoadSample();
                 onClose();
               }}
-              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg shrink-0 flex items-center gap-1.5"
+              className="w-full sm:w-auto px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg shrink-0 flex items-center justify-center gap-1.5"
             >
               <LayoutGrid className="w-3.5 h-3.5" />
               <span>Load Sample A0</span>
@@ -215,7 +218,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
           </div>
         </div>
 
-        <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+        <div className="px-4 py-2.5 sm:px-5 sm:py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
           <button
             type="button"
             onClick={onClose}
