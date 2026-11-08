@@ -54,18 +54,22 @@ import { RULER_THICKNESS_PX } from './components/Rulers';
 import {
   ExportModal,
   NewDocumentModal,
+  RecoveryDraftModal,
   SaveAsModal,
   SaveAsOutcome,
   UnsavedChangesModal,
 } from './components/Modals';
-
-interface HistorySnapshot {
-  paperSize: PaperFormat;
-  orientation: Orientation;
-  widthMm: number;
-  heightMm: number;
-  pages: PageData[];
-}
+import {
+  clearRecoveryDraft,
+  HistorySnapshot,
+  markTabSessionClean,
+  markTabSessionDirty,
+  peekRecoveryDraftSummary,
+  probeRecoveryStorage,
+  RecoveryDraftSummary,
+  restoreRecoveryDraft,
+  saveRecoveryCheckpoint,
+} from './services/recoveryDraftService';
 
 type PendingReplacementAction =
   | { type: 'open-new-modal' }
@@ -146,6 +150,8 @@ export default function App() {
   // Synchronized refs to avoid stale closures during rapid Undo/Redo, drag commits, or file drops
   const docRef = useRef<PageLayDocument>(doc);
   docRef.current = doc;
+  const activePageIndexRef = useRef<number>(activePageIndex);
+  activePageIndexRef.current = activePageIndex;
   const historyPastRef = useRef<HistorySnapshot[]>(historyPast);
   historyPastRef.current = historyPast;
   const historyFutureRef = useRef<HistorySnapshot[]>(historyFuture);
@@ -164,6 +170,22 @@ export default function App() {
     useState<PendingReplacementAction | null>(null);
   const pendingReplacementRef = useRef<PendingReplacementAction | null>(null);
   const newModalAuthorisedRef = useRef<boolean>(false);
+
+  // Local IndexedDB Draft Recovery State
+  const [recoveryDraftSummary, setRecoveryDraftSummary] =
+    useState<RecoveryDraftSummary | null>(null);
+  const [isRecoveryModalOpen, setIsRecoveryModalOpen] = useState<boolean>(false);
+  const [isRecoveringDraft, setIsRecoveringDraft] = useState<boolean>(false);
+  const [isRecoveryReady, setIsRecoveryReady] = useState<boolean>(false);
+  const recoveryReadyRef = useRef<boolean>(false);
+  const hasCheckedStartupRecoveryRef = useRef<boolean>(false);
+  const [lastRecoveryCheckpointAt, setLastRecoveryCheckpointAt] = useState<
+    string | null
+  >(null);
+  const [recoveryStorageWarning, setRecoveryStorageWarning] = useState<
+    string | null
+  >(null);
+  const checkpointTimerRef = useRef<number | null>(null);
 
   const [exportModalState, setExportModalState] = useState<{
     isOpen: boolean;
@@ -268,13 +290,261 @@ export default function App() {
     isDirtyRef.current = true;
     newModalAuthorisedRef.current = false;
     setIsDirty(true);
+    markTabSessionDirty(docRef.current.id, docRef.current.name);
   }, []);
 
   const markClean = useCallback(() => {
     isDirtyRef.current = false;
     newModalAuthorisedRef.current = false;
     setIsDirty(false);
+    markTabSessionClean(docRef.current.id, docRef.current.name);
   }, []);
+
+  const cancelPendingRecoveryCheckpoint = useCallback(() => {
+    if (checkpointTimerRef.current !== null) {
+      window.clearTimeout(checkpointTimerRef.current);
+      checkpointTimerRef.current = null;
+    }
+  }, []);
+
+  const flushRecoveryCheckpointNow = useCallback(async () => {
+    cancelPendingRecoveryCheckpoint();
+    if (!recoveryReadyRef.current || !isDirtyRef.current) return;
+    const res = await saveRecoveryCheckpoint(
+      docRef.current,
+      activePageIndexRef.current,
+      historyPastRef.current,
+      historyFutureRef.current
+    );
+    if (res.status === 'saved' && res.savedAtIso) {
+      setLastRecoveryCheckpointAt(
+        new Date(res.savedAtIso).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      );
+      if (res.historyTruncated) {
+        setRecoveryStorageWarning(
+          'Browser storage is nearly full — older Undo steps were trimmed. Please Save (.lay) directly to disk.'
+        );
+      } else {
+        setRecoveryStorageWarning((prev) => (prev ? null : prev));
+      }
+    } else if (
+      res.status === 'quota-exceeded' ||
+      res.status === 'unavailable' ||
+      res.status === 'error'
+    ) {
+      const warning =
+        res.errorMessage ||
+        'Local draft recovery storage is unavailable or full. Use Save (.lay) directly to protect your work.';
+      setRecoveryStorageWarning(warning);
+    }
+  }, [cancelPendingRecoveryCheckpoint]);
+
+  const resolveAndClearRecoveryDraft = useCallback(
+    async (cleanDoc?: PageLayDocument) => {
+      cancelPendingRecoveryCheckpoint();
+      setLastRecoveryCheckpointAt(null);
+      const target = cleanDoc ?? docRef.current;
+      await clearRecoveryDraft(target.id, target.name);
+    },
+    [cancelPendingRecoveryCheckpoint]
+  );
+
+  /**
+   * Synchronously clears both undo and redo history stacks and refs (used only when creating or opening a new document).
+   */
+  const clearHistory = useCallback(() => {
+    historyPastRef.current = [];
+    historyFutureRef.current = [];
+    setHistoryPast([]);
+    setHistoryFuture([]);
+  }, []);
+
+  /**
+   * Restores the persisted recovery draft (including document contents, original binary images,
+   * active page index, and `historyPast` / `historyFuture` Undo/Redo stacks) into active editor state.
+   */
+  const applyRestoredRecoveryDraft = useCallback(async (): Promise<boolean> => {
+    const restored = await restoreRecoveryDraft();
+    if (!restored) {
+      return false;
+    }
+
+    docRef.current = restored.doc;
+    activePageIndexRef.current = restored.activePageIndex;
+    historyPastRef.current = restored.historyPast;
+    historyFutureRef.current = restored.historyFuture;
+    isDirtyRef.current = true;
+    newModalAuthorisedRef.current = false;
+
+    setDoc(restored.doc);
+    setActivePageIndex(restored.activePageIndex);
+    setHistoryPast(restored.historyPast);
+    setHistoryFuture(restored.historyFuture);
+    // Never assume an earlier file handle is still writable after a restart
+    setActiveFileHandle(null);
+    setSelectedObjectId(null);
+    setSelectedObjectIds([]);
+    setSelectedGuideId(null);
+    setCroppingImageId(null);
+    setEditingTextId(null);
+    setIsDirty(true);
+    setLastSavedAt(null);
+    setLastRecoveryCheckpointAt(
+      new Date(restored.summary.savedAtIso).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    );
+    markTabSessionDirty(restored.doc.id, restored.doc.name);
+    setIsRecoveryModalOpen(false);
+    setRecoveryDraftSummary(null);
+    recoveryReadyRef.current = true;
+    setIsRecoveryReady(true);
+
+    setTimeout(() => {
+      fitPageToWorkspace(restored.doc.widthMm, restored.doc.heightMm, 'page');
+    }, 50);
+    showToast('Draft restored locally');
+    return true;
+  }, [fitPageToWorkspace, showToast]);
+
+  // Startup probe for IndexedDB availability & existing unsaved recovery draft (runs once on mount)
+  useEffect(() => {
+    if (hasCheckedStartupRecoveryRef.current) return;
+    hasCheckedStartupRecoveryRef.current = true;
+
+    let cancelled = false;
+    (async () => {
+      const diag = await probeRecoveryStorage();
+      if (cancelled) return;
+      if (!diag.available) {
+        const msg =
+          diag.limitationReason ||
+          'Local draft recovery is unavailable in this browser environment. Please Save (.lay) frequently.';
+        setRecoveryStorageWarning(msg);
+        recoveryReadyRef.current = true;
+        setIsRecoveryReady(true);
+        return;
+      }
+
+      const existingSummary = await peekRecoveryDraftSummary();
+      if (cancelled) return;
+      if (existingSummary && !isDirtyRef.current) {
+        if (existingSummary.isSameActiveTabSession) {
+          // Quiet automatic recovery when the browser reloaded the exact same active tab editing session
+          const restoredOk = await applyRestoredRecoveryDraft();
+          if (!cancelled && !restoredOk) {
+            setRecoveryDraftSummary(existingSummary);
+            setIsRecoveryModalOpen(true);
+          }
+        } else {
+          // Interrupted session from a previous browser launch or another tab: ask for confirmation
+          setRecoveryDraftSummary(existingSummary);
+          setIsRecoveryModalOpen(true);
+        }
+      } else {
+        recoveryReadyRef.current = true;
+        setIsRecoveryReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyRestoredRecoveryDraft]);
+
+  // Debounced automatic recovery checkpoint (~1.0 second) after meaningful document edits or Undo/Redo
+  useEffect(() => {
+    if (!isRecoveryReady || isRecoveryModalOpen || !isDirty) {
+      cancelPendingRecoveryCheckpoint();
+      return;
+    }
+    cancelPendingRecoveryCheckpoint();
+    checkpointTimerRef.current = window.setTimeout(() => {
+      checkpointTimerRef.current = null;
+      void flushRecoveryCheckpointNow();
+    }, 1000);
+
+    return () => {
+      cancelPendingRecoveryCheckpoint();
+    };
+  }, [
+    doc,
+    activePageIndex,
+    historyPast,
+    historyFuture,
+    isDirty,
+    isRecoveryReady,
+    isRecoveryModalOpen,
+    cancelPendingRecoveryCheckpoint,
+    flushRecoveryCheckpointNow,
+  ]);
+
+  // Immediate recovery checkpoint when page becomes hidden, suspended, or unloaded on mobile/desktop
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (
+        document.visibilityState === 'hidden' &&
+        isDirtyRef.current &&
+        recoveryReadyRef.current
+      ) {
+        void flushRecoveryCheckpointNow();
+      }
+    };
+    const handlePageHide = () => {
+      if (isDirtyRef.current && recoveryReadyRef.current) {
+        void flushRecoveryCheckpointNow();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('freeze', handlePageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('freeze', handlePageHide);
+    };
+  }, [flushRecoveryCheckpointNow]);
+
+  const handleConfirmRecoverDraft = useCallback(async () => {
+    if (isRecoveringDraft) return;
+    setIsRecoveringDraft(true);
+    try {
+      const ok = await applyRestoredRecoveryDraft();
+      if (!ok) {
+        await clearRecoveryDraft();
+        setIsRecoveryModalOpen(false);
+        setRecoveryDraftSummary(null);
+        recoveryReadyRef.current = true;
+        setIsRecoveryReady(true);
+        showToast(
+          'Could not restore the local recovery draft because it was incomplete or corrupted.',
+          'error'
+        );
+      }
+    } finally {
+      setIsRecoveringDraft(false);
+    }
+  }, [applyRestoredRecoveryDraft, isRecoveringDraft, showToast]);
+
+  const handleDiscardRecoveryDraft = useCallback(async () => {
+    if (isRecoveringDraft) return;
+    setIsRecoveringDraft(true);
+    try {
+      await resolveAndClearRecoveryDraft(docRef.current);
+      setIsRecoveryModalOpen(false);
+      setRecoveryDraftSummary(null);
+      recoveryReadyRef.current = true;
+      setIsRecoveryReady(true);
+      showToast('Discarded local working draft');
+    } finally {
+      setIsRecoveringDraft(false);
+    }
+  }, [isRecoveringDraft, resolveAndClearRecoveryDraft, showToast]);
 
   /**
    * Pushes current state onto history stack before a committed mutation.
@@ -292,16 +562,6 @@ export default function App() {
     },
     [markDirty]
   );
-
-  /**
-   * Synchronously clears both undo and redo history stacks and refs (used only when creating or opening a new document).
-   */
-  const clearHistory = useCallback(() => {
-    historyPastRef.current = [];
-    historyFutureRef.current = [];
-    setHistoryPast([]);
-    setHistoryFuture([]);
-  }, []);
 
   const handleUndo = useCallback(() => {
     const past = historyPastRef.current;
@@ -715,6 +975,9 @@ export default function App() {
     isSavingRef.current = true;
     setIsSavingInModal(true);
     try {
+      if (isDirtyRef.current) {
+        void flushRecoveryCheckpointNow();
+      }
       const hadExistingHandle = Boolean(activeFileHandle);
       const res = await saveDocumentToExistingOrNewHandle(doc, activeFileHandle);
 
@@ -743,6 +1006,7 @@ export default function App() {
           updatedAt: new Date().toISOString(),
         }));
         markClean();
+        void resolveAndClearRecoveryDraft();
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -764,7 +1028,14 @@ export default function App() {
       isSavingRef.current = false;
       setIsSavingInModal(false);
     }
-  }, [doc, activeFileHandle, markClean, showToast]);
+  }, [
+    doc,
+    activeFileHandle,
+    flushRecoveryCheckpointNow,
+    markClean,
+    resolveAndClearRecoveryDraft,
+    showToast,
+  ]);
 
   /**
    * Save As (`Ctrl/Cmd+Shift+S` or Save As... button):
@@ -776,6 +1047,9 @@ export default function App() {
     if (isSavingRef.current) return;
     isSavingRef.current = true;
     try {
+      if (isDirtyRef.current) {
+        void flushRecoveryCheckpointNow();
+      }
       const res = await saveDocumentAsWithNativePicker(doc, activeFileHandle);
 
       if (res.status === 'cancelled') {
@@ -803,6 +1077,7 @@ export default function App() {
           updatedAt: new Date().toISOString(),
         }));
         markClean();
+        void resolveAndClearRecoveryDraft();
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -818,7 +1093,14 @@ export default function App() {
     } finally {
       isSavingRef.current = false;
     }
-  }, [doc, activeFileHandle, markClean, showToast]);
+  }, [
+    doc,
+    activeFileHandle,
+    flushRecoveryCheckpointNow,
+    markClean,
+    resolveAndClearRecoveryDraft,
+    showToast,
+  ]);
 
   /**
    * Opens an existing `.lay` document using `showOpenFilePicker()` where supported,
@@ -836,6 +1118,7 @@ export default function App() {
       }
       const loaded = res.doc;
       docRef.current = loaded;
+      activePageIndexRef.current = 0;
       setDoc(loaded);
       setActiveFileHandle(res.fileHandle ?? null);
       setActivePageIndex(0);
@@ -846,6 +1129,7 @@ export default function App() {
       setEditingTextId(null);
       clearHistory();
       markClean();
+      void resolveAndClearRecoveryDraft();
       setLastSavedAt(
         new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       );
@@ -861,7 +1145,13 @@ export default function App() {
       );
       return false;
     }
-  }, [clearHistory, fitPageToWorkspace, markClean, showToast]);
+  }, [
+    clearHistory,
+    fitPageToWorkspace,
+    markClean,
+    resolveAndClearRecoveryDraft,
+    showToast,
+  ]);
 
   /**
    *Keyboard shortcuts (Undo, Redo, Save, Save As, Select All, Group, Ungroup, Lock/Unlock, Delete, Copy, Paste, Duplicate, Escape, Arrow Nudge).
@@ -870,12 +1160,13 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       // Do not intercept global editor shortcuts while a modal dialog is open
       if (
+        isRecoveryModalOpen ||
         isNewModalOpen ||
         isSaveAsModalOpen ||
         isUnsavedModalOpen ||
         exportModalState.isOpen
       ) {
-        if (e.key === 'Escape') {
+        if (e.key === 'Escape' && !isRecoveryModalOpen) {
           if (isUnsavedModalOpen && !isSavingRef.current) {
             setIsUnsavedModalOpen(false);
             setPendingReplacementAction(null);
@@ -1153,6 +1444,7 @@ export default function App() {
     croppingImageId,
     activeTool,
     clipboardObject,
+    isRecoveryModalOpen,
     isNewModalOpen,
     isSaveAsModalOpen,
     isUnsavedModalOpen,
@@ -1181,6 +1473,7 @@ export default function App() {
       try {
         const loadedDoc = await loadDocumentFromLayFile(file);
         docRef.current = loadedDoc;
+        activePageIndexRef.current = 0;
         setDoc(loadedDoc);
         // A File object from file input or drag-and-drop does not provide a writable FileSystemFileHandle
         setActiveFileHandle(null);
@@ -1192,6 +1485,7 @@ export default function App() {
         setEditingTextId(null);
         clearHistory();
         markClean();
+        void resolveAndClearRecoveryDraft();
         setLastSavedAt(null);
         setTimeout(() => {
           fitPageToWorkspace(loadedDoc.widthMm, loadedDoc.heightMm, 'page');
@@ -1206,7 +1500,13 @@ export default function App() {
         );
       }
     },
-    [clearHistory, fitPageToWorkspace, markClean, showToast]
+    [
+      clearHistory,
+      fitPageToWorkspace,
+      markClean,
+      resolveAndClearRecoveryDraft,
+      showToast,
+    ]
   );
 
   /**
@@ -1216,6 +1516,7 @@ export default function App() {
     try {
       const sampleDoc = await createSampleExhibitionDocument();
       docRef.current = sampleDoc;
+      activePageIndexRef.current = 0;
       setDoc(sampleDoc);
       setActiveFileHandle(null);
       setActivePageIndex(0);
@@ -1226,6 +1527,7 @@ export default function App() {
       setEditingTextId(null);
       clearHistory();
       markClean();
+      void resolveAndClearRecoveryDraft();
       setLastSavedAt(null);
       setTimeout(() => {
         fitPageToWorkspace(sampleDoc.widthMm, sampleDoc.heightMm, 'page');
@@ -1237,7 +1539,13 @@ export default function App() {
         'error'
       );
     }
-  }, [clearHistory, fitPageToWorkspace, markClean, showToast]);
+  }, [
+    clearHistory,
+    fitPageToWorkspace,
+    markClean,
+    resolveAndClearRecoveryDraft,
+    showToast,
+  ]);
 
   /**
    * Executes a document-replacing action after unsaved changes have been saved or explicitly discarded.
@@ -1263,6 +1571,7 @@ export default function App() {
           fresh.widthMm = action.widthMm;
           fresh.heightMm = action.heightMm;
           docRef.current = fresh;
+          activePageIndexRef.current = 0;
           setDoc(fresh);
           setActiveFileHandle(null);
           setActivePageIndex(0);
@@ -1273,6 +1582,7 @@ export default function App() {
           setEditingTextId(null);
           clearHistory();
           markClean();
+          void resolveAndClearRecoveryDraft();
           setLastSavedAt(null);
           setTimeout(() => {
             fitPageToWorkspace(action.widthMm, action.heightMm, 'page');
@@ -1310,6 +1620,7 @@ export default function App() {
       loadSampleDocumentImmediate,
       markClean,
       openLayFileAndApply,
+      resolveAndClearRecoveryDraft,
       showToast,
     ]
   );
@@ -1333,11 +1644,17 @@ export default function App() {
         return;
       }
 
+      void flushRecoveryCheckpointNow();
       pendingReplacementRef.current = action;
       setPendingReplacementAction(action);
       setIsUnsavedModalOpen(true);
     },
-    [isDirty, isNewModalOpen, executeReplacementAction]
+    [
+      isDirty,
+      isNewModalOpen,
+      executeReplacementAction,
+      flushRecoveryCheckpointNow,
+    ]
   );
 
   const handleLoadSampleDocument = useCallback(() => {
@@ -2034,6 +2351,8 @@ export default function App() {
         zoom={zoom}
         isDirty={isDirty}
         lastSavedAt={lastSavedAt}
+        lastRecoveryCheckpointAt={lastRecoveryCheckpointAt}
+        recoveryStorageWarning={recoveryStorageWarning}
         cursorMm={cursorMm}
         hasSelection={Boolean(selectedObject || selectedObjectIds.length > 0)}
         onZoomIn={() => setZoom((z) => Math.min(4.0, Number((z * 1.2).toFixed(2))))}
@@ -2045,6 +2364,18 @@ export default function App() {
       />
 
       {/* MODALS */}
+      <RecoveryDraftModal
+        isOpen={isRecoveryModalOpen}
+        summary={recoveryDraftSummary}
+        isBusy={isRecoveringDraft}
+        onRecover={() => {
+          void handleConfirmRecoverDraft();
+        }}
+        onDiscardRecovery={() => {
+          void handleDiscardRecoveryDraft();
+        }}
+      />
+
       <NewDocumentModal
         isOpen={isNewModalOpen}
         onClose={() => {
@@ -2115,6 +2446,8 @@ export default function App() {
           setIsUnsavedModalOpen(false);
           setPendingReplacementAction(null);
           pendingReplacementRef.current = null;
+          markClean();
+          void resolveAndClearRecoveryDraft();
           if (pending) {
             void executeReplacementAction(pending);
           }
@@ -2155,6 +2488,7 @@ export default function App() {
           setIsSaveAsModalOpen(false);
           setPendingReplacementAction(null);
           pendingReplacementRef.current = null;
+          void resolveAndClearRecoveryDraft();
           if (pending) {
             void executeReplacementAction(pending);
           }
@@ -2163,6 +2497,9 @@ export default function App() {
           if (isSavingRef.current) return 'cancelled';
           isSavingRef.current = true;
           try {
+            if (isDirtyRef.current) {
+              void flushRecoveryCheckpointNow();
+            }
             const res = await saveDocumentAsLayFileWithPicker(
               doc,
               newName,
@@ -2187,6 +2524,7 @@ export default function App() {
               updatedAt: new Date().toISOString(),
             }));
             markClean();
+            void resolveAndClearRecoveryDraft();
             setLastSavedAt(
               new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             );

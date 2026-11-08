@@ -324,6 +324,61 @@
       - Generates fresh unique IDs for all imported pages, guidelines, objects, and group children while preserving page names, z-order, rotations, shapes, dimensions, text formatting, and freehand Pen/Highlighter strokes.
     - Records the entire multi-page import as a **single undoable operation** (`pushHistory(currentDoc)`), keeping imported `ImageAsset`s in `doc.assets` so **Undo** followed by **Redo** restores all imported pages and images, while `serializeDocumentToLayBlob` in `src/services/layFileService.ts` filters out unreferenced orphan assets when saving `.lay` archives.
 
+### Milestone 23 — Fix New Document Modal on Mobile Viewports
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Fix New Document Modal on Mobile"*
+- **Engineering Changes**:
+  - Updated `NewDocumentModal` in `src/components/Modals.tsx` to fit constrained mobile viewports (including Android Chrome browser toolbars, Google AI Studio's preview frame, landscape orientation, and on-screen keyboards):
+    - Pinned the modal header and bottom action bar (`Cancel` and `Create Blank Document`) with `shrink-0` inside `max-h-[calc(100dvh-16px)] sm:max-h-[90dvh]` with safe-area inset padding.
+    - Enabled smooth vertical touch scrolling on the form body (`flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y` with `data-allow-touch-scroll="true"`).
+    - Reflowed paper-size cards (`grid-cols-2 sm:grid-cols-3`), orientation and custom dimension inputs (`grid-cols-1 sm:grid-cols-2`), and the Sample A0 callout (`flex-col sm:flex-row`) for narrow screens.
+
+### Milestone 24 — Critical Mobile Session Recovery and Local Draft Protection
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Critical Mobile Session Recovery and Local Draft Protection"*
+- **Engineering Changes**:
+  - **Local Recovery Storage (`src/services/recoveryDraftService.ts`)**:
+    - Implemented a dedicated IndexedDB database (`pagelay_local_recovery_v1`) with two atomic object stores (`draft_meta` and `draft_assets`), kept strictly separate from `.lay` archives and future Open Recent lists.
+    - Preserves full document and page metadata, all pages and objects, freehand Pen and Highlighter strokes, text, dimensions, shapes, guidelines, object IDs, and original binary image assets (`Uint8Array`) without recompression or downsampling.
+    - Never persists temporary `blob:` object URLs; recreates fresh `blob:` URLs from raw `Uint8Array` bytes on recovery.
+    - Uses an in-memory + IndexedDB key signature check (`persistedAssetSignatures`) so unchanged multi-megabyte image binaries are never rewritten during routine edits (moving objects, drawing strokes, typing text, adjusting guidelines).
+  - **Automatic Recovery Checkpoints & Concurrency Safety (`src/App.tsx`, `src/services/recoveryDraftService.ts`)**:
+    - Debounces local checkpoints (`1.2s`) after meaningful document edits (`isDirty === true`).
+    - Immediately flushes pending checkpoints on `visibilitychange` (`document.visibilityState === 'hidden'`), `pagehide`, `freeze` (Page Lifecycle API), and before internal document transitions (`requestDocumentReplacement`, `handleSaveDocument`, `handleSaveAsDocument`).
+    - Serializes all IndexedDB operations through an async queue with a monotonically increasing `revision` counter so an older checkpoint can never overwrite a newer version or resurrect a cleared draft.
+  - **Startup Recovery Prompt (`RecoveryDraftModal` in `src/components/Modals.tsx`, `src/App.tsx`)**:
+    - On startup, probes IndexedDB availability (`probeRecoveryStorage`) and checks for an existing valid recovery draft (`peekRecoveryDraftSummary`) before allowing any new checkpoint writes.
+    - Displays **"Recover unsaved document?"** with the document name, last recovery time, paper format, page count, and image count, offering:
+      - **Recover**: Restores the document and full-resolution `Uint8Array` image assets, resets `activeFileHandle` to `null` (never assuming an old handle is still writable), and marks the document as **Unsaved** (`isDirty = true`).
+      - **Discard Recovery**: Deliberately clears `draft_meta` and `draft_assets` from IndexedDB so the discarded work never returns on subsequent refreshes.
+  - **Save, Save As, Discard & Document Replacement Integration (`src/App.tsx`, `src/components/StatusBar.tsx`)**:
+    - Clears the recovery draft (`resolveAndClearRecoveryDraft`) when a manual **Save** or **Save As** succeeds, when the user explicitly selects **Don't Save**, or when a new/opened/sample document replaces the active session cleanly, while preserving the recovery draft if Save / Save As is cancelled or fails.
+    - Keeps local recovery checkpoints distinct from explicit `.lay` saves (`StatusBar` continues to show **Unsaved** until a `.lay` file is saved, and displays a clear warning badge if IndexedDB is unavailable or over quota).
+
+### Milestone 25 — Refine Mobile Recovery UX and Preserve Undo/Redo History
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Refine Mobile Recovery UX and Preserve Undo/Redo History"*
+- **Confirmed Root Causes**:
+  1. **Blocking Modal Shown on Every Same-Tab Mobile Reload (`src/App.tsx`, `src/services/recoveryDraftService.ts`)**:
+     - On startup, `App.tsx` checked `peekRecoveryDraftSummary()` and unconditionally opened the blocking `RecoveryDraftModal` whenever any draft existed in IndexedDB, without recording or checking `window.sessionStorage` to distinguish an in-place reload of the same active browser tab (such as an Android/iPhone screen lock/unlock reload or AI Studio preview reload) from a genuine interrupted session opened in a new tab or after a browser restart.
+  2. **Loss of Undo/Redo History on Recovery (`src/services/recoveryDraftService.ts`, `src/App.tsx`)**:
+     - `StoredRecoveryDraftMeta` only persisted `doc` and `activePageIndex` (omitting `historyPast` and `historyFuture`), and `handleConfirmRecoverDraft` in `src/App.tsx` explicitly called `clearHistory()`. Furthermore, `draft_assets` garbage collection only scanned `doc.pages`, meaning an image that had just been deleted before a phone lock would have its binary `Uint8Array` pruned from `draft_assets` and could not be restored by Undo after recovery.
+- **Engineering Changes**:
+  - **Quiet Automatic Recovery of the Same Working Session (`src/services/recoveryDraftService.ts`, `src/App.tsx`)**:
+    - Captures the pre-existing `window.sessionStorage` marker (`pagelay_active_tab_session_v1`) synchronously on module load (`initialTabMarkerOnLoad`) before React effects run, and binds each recovery checkpoint (`meta.tabSessionId`) and dirty state (`markTabSessionDirty` / `markTabSessionClean`) to the active tab's `tabSessionId` and `documentId`.
+    - When `isSameActiveSessionReload(meta)` confirms that the reloaded tab matches the checkpoint's `tabSessionId`, `documentId`, and `isDirty === true`, `App.tsx` automatically restores the document, original images, active page, and Undo/Redo history (`applyRestoredRecoveryDraft`) without showing a blocking modal, displaying a discreet `"Draft restored locally"` toast notification.
+    - When session identity is uncertain (new tab, closed tab, or full browser restart), PageLay requires explicit user confirmation via `RecoveryDraftModal`.
+  - **Full Undo/Redo History & Deleted Asset Preservation Across Recovery (`src/services/recoveryDraftService.ts`, `src/App.tsx`)**:
+    - Extended `StoredRecoveryDraftMeta` to persist bounded `historyPast` and `historyFuture` stacks (up to `40` snapshots each, with an automatic `8`-snapshot fallback if storage quota is tight) tagged with `historyDocumentId = doc.id`.
+    - Added `collectAllReferencedAssetIdsAcrossHistory(pagesClone, boundedPast, boundedFuture)` so `draft_assets` retains all binary `Uint8Array` image assets referenced by either the current pages OR any snapshot in `historyPast` / `historyFuture` without duplicating binary bytes across history entries.
+    - Updated `applyRestoredRecoveryDraft` in `src/App.tsx` to restore `restored.historyPast` and `restored.historyFuture` directly so Undo (`Ctrl/Cmd+Z` / toolbar Undo) and Redo (`Ctrl/Cmd+Y` / toolbar Redo) immediately work after recovery—including restoring objects or images deleted just before a phone lock.
+  - **Friendlier Interrupted-Session Recovery Modal (`src/components/Modals.tsx`)**:
+    - Updated `RecoveryDraftModal` with the heading **"Continue editing your document?"**, reassuring copy (*"PageLay found a locally saved working draft of [document name]. You can continue where you left off."*), primary button **Continue Editing**, and secondary button **Discard Draft** protected by a two-step inline confirmation (**Keep Draft** vs **Permanently Discard**), while displaying the document name, last recovery timestamp, paper size, page/image count, and preserved Undo/Redo step counts.
+    - Upon selecting **Continue Editing**, `restoreRecoveryDraft()` binds the checkpoint to the current `tabSessionId` in IndexedDB and `sessionStorage` so subsequent reloads in that tab recover quietly without re-prompting.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference
@@ -367,5 +422,6 @@
 | Page Alignment Controls | `src/components/PropertiesPanel.tsx` | Verified | Left, Center H, Right, Top, Center V, Bottom, Center Both |
 | Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx` | Verified | `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
 | Undo/Redo & Keyboard Shortcuts Suite | `src/App.tsx`, `src/components/EditorCanvas.tsx` | Verified | Pre-drag history snapshots, Undo (`Ctrl+Z`), Redo (`Ctrl+Y`/`Ctrl+Shift+Z`), Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
-| `.lay` Archive Save / Save As / Open | `src/services/layFileService.ts`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation |
+| `.lay` Archive Save / Save As / Open & Page Import | `src/services/layFileService.ts`, `src/components/PagesSidebar.tsx`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation, sidebar `.lay` page import |
+| Local Session Recovery & Undo/Redo Persistence | `src/services/recoveryDraftService.ts`, `src/App.tsx`, `src/components/Modals.tsx` | Verified | Quiet same-tab reload recovery (`sessionStorage` + IndexedDB), full `historyPast`/`historyFuture` & deleted image asset retention, "Continue editing your document?" modal |
 | Vector PDF & High-DPI Export | `src/services/pdfExportService.ts`, `src/services/imageExportService.ts` | Verified | `pdf-lib` vector output + 72/150/300 DPI PNG/JPG |

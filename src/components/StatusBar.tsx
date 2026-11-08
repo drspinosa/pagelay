@@ -14,6 +14,7 @@ import {
   Focus,
   CheckCircle2,
   CircleDot,
+  AlertTriangle,
 } from 'lucide-react';
 import { Orientation, PaperFormat } from '../model/documentTypes';
 
@@ -27,6 +28,8 @@ interface StatusBarProps {
   zoom: number;
   isDirty: boolean;
   lastSavedAt: string | null;
+  lastRecoveryCheckpointAt?: string | null;
+  recoveryStorageWarning?: string | null;
   cursorMm: { x: number; y: number } | null;
   hasSelection: boolean;
   onZoomIn: () => void;
@@ -49,6 +52,8 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   zoom,
   isDirty,
   lastSavedAt,
+  lastRecoveryCheckpointAt,
+  recoveryStorageWarning,
   cursorMm,
   hasSelection,
   onZoomIn,
@@ -80,7 +85,16 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         <span aria-hidden="true" className="hidden md:inline text-slate-300">
           ·
         </span>
-        <div className="hidden md:flex items-center gap-1.5 whitespace-nowrap">
+        <div
+          className="hidden md:flex items-center gap-1.5 whitespace-nowrap"
+          title={
+            recoveryStorageWarning
+              ? recoveryStorageWarning
+              : isDirty && lastRecoveryCheckpointAt
+              ? `Unsaved changes (local recovery draft updated at ${lastRecoveryCheckpointAt} — use Save to write .lay file)`
+              : undefined
+          }
+        >
           {isDirty || !lastSavedAt ? (
             <>
               <CircleDot className="w-3.5 h-3.5 text-amber-600 shrink-0" />
@@ -91,6 +105,15 @@ export const StatusBar: React.FC<StatusBarProps> = ({
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
               <span className="text-slate-600">{`Saved (${lastSavedAt})`}</span>
             </>
+          )}
+          {recoveryStorageWarning && (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5 ml-1"
+              title={recoveryStorageWarning}
+            >
+              <AlertTriangle className="w-3 h-3 shrink-0" />
+              <span>Draft recovery unavailable</span>
+            </span>
           )}
         </div>
       </div>

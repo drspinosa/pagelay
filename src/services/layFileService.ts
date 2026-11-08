@@ -505,7 +505,7 @@ export async function openDocumentWithNativePicker(): Promise<OpenLayPickerResul
   };
 }
 
-function sanitizeLoadedPageObjects(objects: PageObject[]): PageObject[] {
+export function sanitizeLoadedPageObjects(objects: PageObject[]): PageObject[] {
   if (!Array.isArray(objects)) return [];
   const sanitized: PageObject[] = [];
 

@@ -22,6 +22,8 @@ import {
   Loader2,
   LayoutGrid,
   Save,
+  RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import { Orientation, PageLayDocument, PaperFormat } from '../model/documentTypes';
 import { getPaperDimensionsMm, ISO_PAPER_SIZES } from '../utils/units';
@@ -30,6 +32,7 @@ import {
   findSystemFontWarnings,
 } from '../services/pdfExportService';
 import { exportPageToImageFile } from '../services/imageExportService';
+import { RecoveryDraftSummary } from '../services/recoveryDraftService';
 
 interface NewDocumentModalProps {
   isOpen: boolean;
@@ -920,5 +923,209 @@ export const UnsavedChangesModal: React.FC<UnsavedChangesModalProps> = ({
     </div>
   );
 };
+
+interface RecoveryDraftModalProps {
+  isOpen: boolean;
+  summary: RecoveryDraftSummary | null;
+  isBusy: boolean;
+  onRecover: () => void;
+  onDiscardRecovery: () => void;
+}
+
+function formatRecoveryTimestamp(savedAtMs: number, savedAtIso: string): string {
+  const date = new Date(Number.isFinite(savedAtMs) ? savedAtMs : savedAtIso);
+  if (Number.isNaN(date.getTime())) {
+    return savedAtIso || 'Recent session';
+  }
+  const now = new Date();
+  const isSameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+
+  const timeStr = date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  if (isSameDay) {
+    return `Today at ${timeStr}`;
+  }
+
+  const dateStr = date.toLocaleDateString([], {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+  return `${dateStr} at ${timeStr}`;
+}
+
+export const RecoveryDraftModal: React.FC<RecoveryDraftModalProps> = ({
+  isOpen,
+  summary,
+  isBusy,
+  onRecover,
+  onDiscardRecovery,
+}) => {
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      setConfirmingDiscard(false);
+    }
+  }, [isOpen, summary?.documentId, summary?.revision]);
+
+  if (!isOpen || !summary) return null;
+
+  const formattedTime = formatRecoveryTimestamp(
+    summary.savedAtMs,
+    summary.savedAtIso
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-slate-900/55 flex items-center justify-center p-2 sm:p-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="recovery-draft-title"
+    >
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-md max-h-[calc(100dvh-16px)] sm:max-h-[90dvh] flex flex-col overflow-hidden">
+        <div className="px-4 py-2.5 sm:px-5 sm:py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-2">
+            <RotateCcw className="w-4 h-4 text-blue-600 shrink-0" />
+            <h2 id="recovery-draft-title" className="text-sm font-bold text-slate-900">
+              Continue editing your document?
+            </h2>
+          </div>
+        </div>
+
+        <div
+          data-allow-touch-scroll="true"
+          className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y p-3.5 sm:p-5 space-y-3 text-xs text-slate-700 leading-relaxed"
+        >
+          <p>
+            PageLay found a locally saved working draft of{' '}
+            <span className="font-semibold text-slate-900">
+              {summary.documentName}
+            </span>
+            . You can continue where you left off.
+          </p>
+
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500 shrink-0">Document Name:</span>
+              <span className="font-semibold text-slate-900 truncate">
+                {summary.documentName}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500 shrink-0">Last Recovery Time:</span>
+              <span className="font-mono font-medium text-slate-800">
+                {formattedTime}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500 shrink-0">Layout &amp; Contents:</span>
+              <span className="font-mono text-[11px] text-slate-700 text-right">
+                {summary.paperSize} ({summary.widthMm} × {summary.heightMm} mm) ·{' '}
+                {summary.pageCount} page{summary.pageCount !== 1 ? 's' : ''}
+                {summary.assetCount > 0
+                  ? ` · ${summary.assetCount} original image${
+                      summary.assetCount !== 1 ? 's' : ''
+                    }`
+                  : ''}
+              </span>
+            </div>
+            {summary.undoCount > 0 && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500 shrink-0">Editing History:</span>
+                <span className="font-mono text-[11px] text-slate-700">
+                  {summary.undoCount} undo step{summary.undoCount !== 1 ? 's' : ''} preserved
+                  {summary.redoCount > 0 ? ` (${summary.redoCount} redo)` : ''}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {confirmingDiscard ? (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg space-y-1.5 text-rose-900">
+              <div className="font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                <span>Permanently discard this working draft?</span>
+              </div>
+              <p className="text-[11px] text-rose-800 leading-relaxed">
+                This will permanently remove the local recovery draft of{' '}
+                <span className="font-semibold">{summary.documentName}</span> and its unsaved changes from this browser.
+              </p>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-500">
+              This is an automatic local browser draft, not a saved{' '}
+              <span className="font-mono">.lay</span> file on disk. Continuing restores your pages, Undo/Redo history, and original full-resolution images as an{' '}
+              <span className="font-semibold text-amber-700">Unsaved</span> document so you can use{' '}
+              <span className="font-semibold text-slate-700">Save</span> or{' '}
+              <span className="font-semibold text-slate-700">Save As</span> when ready.
+            </p>
+          )}
+        </div>
+
+        <div className="px-4 py-2.5 sm:px-5 sm:py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-end gap-2 shrink-0">
+          {confirmingDiscard ? (
+            <>
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => setConfirmingDiscard(false)}
+                className="px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200 disabled:opacity-40 rounded-lg"
+              >
+                Keep Draft
+              </button>
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={onDiscardRecovery}
+                className="px-3.5 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 rounded-lg flex items-center gap-1.5"
+              >
+                {isBusy ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5" />
+                )}
+                <span>Permanently Discard</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => setConfirmingDiscard(true)}
+                className="px-3.5 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 disabled:opacity-40 rounded-lg flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Discard Draft</span>
+              </button>
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={onRecover}
+                className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 rounded-lg flex items-center gap-1.5"
+              >
+                {isBusy ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="w-3.5 h-3.5" />
+                )}
+                <span>Continue Editing</span>
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
 

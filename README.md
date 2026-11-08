@@ -44,8 +44,13 @@ All operations run locally in your browser with zero external cloud dependencies
 - **Layer Ordering, Selection & Locking**: Select All (`Ctrl/Cmd+A`), Lock/Unlock selected object(s) (`Ctrl/Cmd+L`), Fit Selection in the Status Bar, Bring to Front, Bring Forward, Send Backward, Send to Back, duplicate (`Ctrl/Cmd+D`), copy/paste (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`), and arrow-key nudging (`1 mm` or `10 mm` with `Shift`).
 - **Multi-Page Management & `.lay` Page Importing**: Add, duplicate, reorder, and delete pages with live miniature vector/image thumbnails in the left Pages Sidebar. Dragging a `.lay` file onto the **Pages Sidebar** (or clicking **Import** in the Pages Sidebar header) appends all pages and referenced untouched image assets from that `.lay` document into the current document as a single undoable operation (validating matching physical paper dimensions in `mm`), whereas dropping a `.lay` file onto the **main canvas** opens it as a replacement document (protected by the unsaved-changes confirmation dialog).
 
-### 5. Native `.lay` Archive, Unsaved-Changes Protection & Print-Ready Exports
+### 5. Native `.lay` Archive, Local Draft Recovery, Unsaved-Changes Protection & Print-Ready Exports
 - **`.lay` Document Format, Save (`Ctrl/Cmd+S`) & Save As (`Ctrl/Cmd+Shift+S`)**: Saves and loads the entire multi-page document as a self-contained `.lay` ZIP archive containing `manifest.json` and the `/assets/` directory with the exact original binary image files (`Uint8Array`). Retains the native `FileSystemFileHandle` where supported for in-place saves and warns before discarding unsaved changes when creating a new document, opening a `.lay` file, loading the sample layout, dropping a `.lay` file onto the canvas, or closing/refreshing the browser tab.
+- **Automatic Local Draft Recovery (`IndexedDB` + Per-Tab Session Tracking)**: Protects unsaved work against mobile phone lock/unlock reloads, background tab termination, and accidental refreshes using a dedicated local IndexedDB database (`pagelay_local_recovery_v1`):
+  - **Quiet Same-Session Reload Recovery**: Associates the active tab (`window.sessionStorage`) with the current document ID and recovery checkpoint. When a mobile lock/unlock cycle, embedded preview reload, or in-tab refresh reloads the same active editing session, PageLay automatically restores the document, original images, active page, and full Undo/Redo history without blocking the screen with a modal, showing a discreet `"Draft restored locally"` notification.
+  - **Full Undo/Redo History & Deleted Asset Retention Across Recovery**: Persists bounded `historyPast` and `historyFuture` stacks alongside the checkpoint without duplicating binary image data, while retaining all `Uint8Array` image binaries referenced by either the active pages or any recoverable Undo/Redo snapshot (so undoing an image deletion or redoing a page import works seamlessly after recovery).
+  - **Incremental Binary Image Storage & Lifecycle Checkpoints**: Preserves full-resolution `Uint8Array` image binaries in `draft_assets` without recompression, writing only newly added or modified image assets, and flushes checkpoints on a `~1.2s` debounce as well as `visibilitychange` (hidden), `pagehide`, `freeze`, and internal document transitions.
+  - **Interrupted-Session Recovery Prompt**: When opening PageLay after a genuine browser restart or in a new tab with an unrecovered draft, presents **"Continue editing your document?"** displaying the document name, last recovery timestamp, paper size, page/image count, and Undo/Redo step count with **Continue Editing** and a two-step confirmed **Discard Draft** option.
 - **Vector PDF Export (`pdf-lib`)**: Generates print-ready PDFs at exact physical millimetre dimensions (`1 mm = 72 / 25.4 pt`), embedding original JPEG/PNG image streams and rendering text, arrows, dimensions, freehand strokes, and shapes as crisp vector graphics.
 - **High-Resolution PNG / JPG Export**: Rasterizes the current page or all pages at **72 DPI** (screen), **150 DPI** (draft print), or **300 DPI** (high-resolution print) with automatic memory-safety scaling on large formats.
 
@@ -92,22 +97,23 @@ npm run lint
 ├── README.md                       # Application documentation
 ├── PROJECT.md                      # Project history, architecture & progression tracker
 └── src/
-    ├── App.tsx                     # Root application state, undo/redo history, keyboard shortcuts
+    ├── App.tsx                     # Root application state, undo/redo history, keyboard shortcuts, draft recovery
     ├── main.tsx                    # React DOM entry point
     ├── index.css                   # Tailwind CSS v4 + mobile touch-action & viewport rules
     ├── components/
     │   ├── TopToolbar.tsx          # File menu, tool selector, guides menu, export triggers
-    │   ├── PagesSidebar.tsx        # Multi-page thumbnail navigator & page actions
+    │   ├── PagesSidebar.tsx        # Multi-page thumbnail navigator, page actions & .lay page import
     │   ├── EditorCanvas.tsx        # Zoom-invariant mm canvas, pointer/touch gestures, object manipulation
     │   ├── Rulers.tsx              # Dynamic horizontal & vertical millimetre rulers
     │   ├── PropertiesPanel.tsx     # Context-sensitive mm inspector, Align menu, Group/Ungroup controls
-    │   ├── StatusBar.tsx           # Live cursor mm coordinates, paper specs, zoom controls
-    │   └── Modals.tsx              # New Document modal & PDF / Image Export modal
+    │   ├── StatusBar.tsx           # Live cursor mm coordinates, paper specs, save/recovery status, zoom controls
+    │   └── Modals.tsx              # New Document, Export, Save As, Unsaved Changes & Recovery Draft modals
     ├── model/
     │   ├── documentTypes.ts        # Authoritative TypeScript interfaces (canonical mm coordinates)
-    │   └── documentFactory.ts      # Document/page factories, deep cloning, A0 sample layout generator
+    │   └── documentFactory.ts      # Document/page factories, deep cloning, page import & A0 sample generator
     ├── services/
     │   ├── layFileService.ts       # .lay ZIP archive packager & loader (JSZip)
+    │   ├── recoveryDraftService.ts # IndexedDB local session recovery & incremental binary asset store
     │   ├── pdfExportService.ts     # Vector PDF generator at exact physical mm scale (pdf-lib)
     │   └── imageExportService.ts   # High-DPI offscreen HTML5 Canvas rasterizer (PNG/JPG)
     └── utils/
