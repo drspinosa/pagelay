@@ -104,6 +104,22 @@ Open http://localhost:3000 to test PageLay locally.
 
 Production files are generated in the `dist/` folder.
 
+### Preparing Files for IONOS Deployment (if you are using IONOS web servers)
+
+After completing development, generate the production build and copy it to the local deployment folder.
+
+```powershell
+# Generate production files
+npm.cmd run build
+
+# Copy production files to the local webpage folder
+Copy-Item -Path ".\dist\*" -Destination ".\webpage\" -Recurse -Force
+```
+
+Upload the contents of `webpage/` via FTP to the IONOS document root for https://pagelay.look4ideas.com.
+
+The `webpage/` folder is excluded from Git locally and should not be committed to GitHub.
+
 ## Project Structure
 
 ```text
