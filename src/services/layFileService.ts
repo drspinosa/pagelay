@@ -182,12 +182,14 @@ export interface SaveLayResult {
   documentName: string;
   filename: string;
   fileHandle: LayFileSystemHandle | null;
+  layBlob?: Blob;
 }
 
 export interface OpenLayPickerResult {
   status: 'opened' | 'cancelled' | 'unsupported';
   doc?: PageLayDocument;
   fileHandle?: LayFileSystemHandle | null;
+  layFile?: File;
 }
 
 /**
@@ -273,6 +275,7 @@ export async function writeDocumentToFileHandle(
     documentName: finalDocName,
     filename: finalFilename,
     fileHandle: handle,
+    layBlob: blob,
   };
 }
 
@@ -422,6 +425,7 @@ export async function saveDocumentAsLayFile(
     documentName: finalDocName,
     filename,
     fileHandle: null,
+    layBlob: blob,
   };
 }
 
@@ -520,6 +524,7 @@ export async function openDocumentWithNativePicker(): Promise<OpenLayPickerResul
     status: 'opened',
     doc,
     fileHandle: handle,
+    layFile: file,
   };
 }
 

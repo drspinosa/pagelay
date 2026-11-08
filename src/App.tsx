@@ -56,6 +56,7 @@ import {
   ExportModal,
   NewDocumentModal,
   RecoveryDraftModal,
+  ReopenRecentModal,
   SaveAsModal,
   SaveAsOutcome,
   UnsavedChangesModal,
@@ -71,6 +72,17 @@ import {
   restoreRecoveryDraft,
   saveRecoveryCheckpoint,
 } from './services/recoveryDraftService';
+import {
+  clearAllRecentDocuments,
+  loadRecentDocuments,
+  readRecentDocumentsSync,
+  RecentDocumentEntry,
+  recordRecentDocument,
+  RecordRecentOptions,
+  removeRecentDocumentEntry,
+  tryReopenRecentDocument,
+  tryReopenRecentFromCachedBlob,
+} from './services/recentFilesService';
 
 type PendingReplacementAction =
   | { type: 'open-new-modal' }
@@ -84,6 +96,7 @@ type PendingReplacementAction =
     }
   | { type: 'open-picker' }
   | { type: 'open-file'; file: File }
+  | { type: 'open-recent'; entry: RecentDocumentEntry }
   | { type: 'load-sample' };
 
 type SaveDocumentOutcome =
@@ -202,6 +215,23 @@ export default function App() {
   const pendingReplacementRef = useRef<PendingReplacementAction | null>(null);
   const newModalAuthorisedRef = useRef<boolean>(false);
 
+  // Open Recent Documents State (Maximum 10 entries, persisted in localStorage + separate IndexedDB handles)
+  const [recentDocuments, setRecentDocuments] = useState<RecentDocumentEntry[]>(() =>
+    readRecentDocumentsSync()
+  );
+  const [reopenRecentModalState, setReopenRecentModalState] = useState<{
+    isOpen: boolean;
+    entry: RecentDocumentEntry | null;
+    reasonMessage: string | null;
+    canOpenLocalCopy: boolean;
+  }>({
+    isOpen: false,
+    entry: null,
+    reasonMessage: null,
+    canOpenLocalCopy: false,
+  });
+  const pendingReopenRecentEntryIdRef = useRef<string | undefined>(undefined);
+
   // Local IndexedDB Draft Recovery State
   const [recoveryDraftSummary, setRecoveryDraftSummary] =
     useState<RecoveryDraftSummary | null>(null);
@@ -230,6 +260,41 @@ export default function App() {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const hiddenImageInputRef = useRef<HTMLInputElement | null>(null);
   const hiddenLayInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Reconcile stored recent document handles on startup without touching recovery storage
+  useEffect(() => {
+    void loadRecentDocuments().then((loaded) => {
+      setRecentDocuments(loaded);
+    });
+  }, []);
+
+  const recordRecentAndSyncState = useCallback(
+    async (options: RecordRecentOptions) => {
+      const updated = await recordRecentDocument(options);
+      setRecentDocuments(updated);
+    },
+    []
+  );
+
+  const handleRemoveRecentDocument = useCallback(async (entryId: string) => {
+    const updated = await removeRecentDocumentEntry(entryId);
+    setRecentDocuments(updated);
+    setReopenRecentModalState((prev) =>
+      prev.entry?.id === entryId
+        ? {
+            isOpen: false,
+            entry: null,
+            reasonMessage: null,
+            canOpenLocalCopy: false,
+          }
+        : prev
+    );
+  }, []);
+
+  const handleClearRecentDocuments = useCallback(async () => {
+    const cleared = await clearAllRecentDocuments();
+    setRecentDocuments(cleared);
+  }, []);
 
   // Keep browser document.title synchronized with the internal PageLay document name
   useEffect(() => {
@@ -1315,6 +1380,14 @@ export default function App() {
           historyPastRef.current,
           historyFutureRef.current
         );
+        void recordRecentAndSyncState({
+          doc: updatedDoc,
+          filename: res.filename,
+          fileHandle: res.fileHandle,
+          layBlob: res.layBlob ?? null,
+          fileSizeBytes: res.layBlob?.size,
+          action: 'saved',
+        });
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -1342,6 +1415,7 @@ export default function App() {
     flushRecoveryCheckpointNow,
     markClean,
     persistCleanActiveDocumentCheckpoint,
+    recordRecentAndSyncState,
     showToast,
   ]);
 
@@ -1393,6 +1467,14 @@ export default function App() {
           historyPastRef.current,
           historyFutureRef.current
         );
+        void recordRecentAndSyncState({
+          doc: updatedDoc,
+          filename: res.filename,
+          fileHandle: res.fileHandle,
+          layBlob: res.layBlob ?? null,
+          fileSizeBytes: res.layBlob?.size,
+          action: 'saved',
+        });
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -1414,6 +1496,7 @@ export default function App() {
     flushRecoveryCheckpointNow,
     markClean,
     persistCleanActiveDocumentCheckpoint,
+    recordRecentAndSyncState,
     showToast,
   ]);
 
@@ -1422,68 +1505,81 @@ export default function App() {
    * retaining its `FileSystemFileHandle` for subsequent in-place saves.
    * Returns `true` if the caller should fall back to `<input type="file">`.
    */
-  const handleTriggerOpenNativePicker = useCallback(async (): Promise<boolean> => {
-    if (!canUseNativeOpenFilePickerSync()) {
-      return true;
-    }
-    const openAttemptGen = ++documentSessionGenRef.current;
-    try {
-      const res = await openDocumentWithNativePicker();
-      if (res.status === 'unsupported') {
+  const handleTriggerOpenNativePicker = useCallback(
+    async (targetRecentEntryId?: string): Promise<boolean> => {
+      if (!canUseNativeOpenFilePickerSync()) {
         return true;
       }
-      if (res.status === 'cancelled' || !res.doc) {
+      const openAttemptGen = ++documentSessionGenRef.current;
+      try {
+        const res = await openDocumentWithNativePicker();
+        if (res.status === 'unsupported') {
+          return true;
+        }
+        if (res.status === 'cancelled' || !res.doc) {
+          return false;
+        }
+        // Guard against a newer document session having started while the native picker was open
+        if (documentSessionGenRef.current !== openAttemptGen) {
+          logDocumentLifecycle(
+            'open-native-picker-ignored-stale-generation',
+            res.doc,
+            { openAttemptGen, currentGen: documentSessionGenRef.current }
+          );
+          return false;
+        }
+        const loaded = res.doc;
+        hasUserReplacedOrEditedDocRef.current = true;
+        docRef.current = loaded;
+        activePageIndexRef.current = 0;
+        setDoc(loaded);
+        setActiveFileHandle(res.fileHandle ?? null);
+        setActivePageIndex(0);
+        setSelectedObjectId(null);
+        setSelectedObjectIds([]);
+        setSelectedGuideId(null);
+        setCroppingImageId(null);
+        setEditingTextId(null);
+        setIsRecoveryModalOpen(false);
+        setRecoveryDraftSummary(null);
+        clearHistory();
+        markClean(true);
+        void persistCleanActiveDocumentCheckpoint(loaded, 0, [], []);
+        void recordRecentAndSyncState({
+          doc: loaded,
+          filename: res.fileHandle?.name || `${loaded.name}.lay`,
+          fileHandle: res.fileHandle ?? null,
+          layBlob: res.layFile ?? null,
+          fileSizeBytes: res.layFile?.size,
+          action: 'opened',
+          targetRecentEntryId,
+        });
+        setLastSavedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        );
+        logDocumentLifecycle('opened-lay-via-native-picker', loaded);
+        setTimeout(() => {
+          fitPageToWorkspace(loaded.widthMm, loaded.heightMm, 'page');
+        }, 50);
+        showToast(`Opened "${loaded.name}.lay"`);
         return false;
-      }
-      // Guard against a newer document session having started while the native picker was open
-      if (documentSessionGenRef.current !== openAttemptGen) {
-        logDocumentLifecycle(
-          'open-native-picker-ignored-stale-generation',
-          res.doc,
-          { openAttemptGen, currentGen: documentSessionGenRef.current }
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Could not open .lay file.',
+          'error'
         );
         return false;
       }
-      const loaded = res.doc;
-      hasUserReplacedOrEditedDocRef.current = true;
-      docRef.current = loaded;
-      activePageIndexRef.current = 0;
-      setDoc(loaded);
-      setActiveFileHandle(res.fileHandle ?? null);
-      setActivePageIndex(0);
-      setSelectedObjectId(null);
-      setSelectedObjectIds([]);
-      setSelectedGuideId(null);
-      setCroppingImageId(null);
-      setEditingTextId(null);
-      setIsRecoveryModalOpen(false);
-      setRecoveryDraftSummary(null);
-      clearHistory();
-      markClean(true);
-      void persistCleanActiveDocumentCheckpoint(loaded, 0, [], []);
-      setLastSavedAt(
-        new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      );
-      logDocumentLifecycle('opened-lay-via-native-picker', loaded);
-      setTimeout(() => {
-        fitPageToWorkspace(loaded.widthMm, loaded.heightMm, 'page');
-      }, 50);
-      showToast(`Opened "${loaded.name}.lay"`);
-      return false;
-    } catch (err) {
-      showToast(
-        err instanceof Error ? err.message : 'Could not open .lay file.',
-        'error'
-      );
-      return false;
-    }
-  }, [
-    clearHistory,
-    fitPageToWorkspace,
-    markClean,
-    persistCleanActiveDocumentCheckpoint,
-    showToast,
-  ]);
+    },
+    [
+      clearHistory,
+      fitPageToWorkspace,
+      markClean,
+      persistCleanActiveDocumentCheckpoint,
+      recordRecentAndSyncState,
+      showToast,
+    ]
+  );
 
   /**
    *Keyboard shortcuts (Undo, Redo, Save, Save As, Select All, Group, Ungroup, Lock/Unlock, Delete, Copy, Paste, Duplicate, Escape, Arrow Nudge).
@@ -1496,6 +1592,7 @@ export default function App() {
         isNewModalOpen ||
         isSaveAsModalOpen ||
         isUnsavedModalOpen ||
+        reopenRecentModalState.isOpen ||
         exportModalState.isOpen
       ) {
         if (e.key === 'Escape' && !isRecoveryModalOpen) {
@@ -1512,6 +1609,14 @@ export default function App() {
             setIsSaveAsModalOpen(false);
             setPendingReplacementAction(null);
             pendingReplacementRef.current = null;
+          }
+          if (reopenRecentModalState.isOpen) {
+            setReopenRecentModalState({
+              isOpen: false,
+              entry: null,
+              reasonMessage: null,
+              canOpenLocalCopy: false,
+            });
           }
           setExportModalState((prev) => ({ ...prev, isOpen: false }));
         }
@@ -1746,6 +1851,7 @@ export default function App() {
     isNewModalOpen,
     isSaveAsModalOpen,
     isUnsavedModalOpen,
+    reopenRecentModalState.isOpen,
     exportModalState.isOpen,
     pushHistory,
     handleUndo,
@@ -1764,11 +1870,11 @@ export default function App() {
   ]);
 
   /**
-   * Loads a `.lay` File object (from `<input type="file">` or drag-and-drop) and replaces the active document
-   * only after archive parsing succeeds.
+   * Loads a `.lay` File object (from `<input type="file">`, drag-and-drop, or reselected recent file)
+   * and replaces the active document only after archive parsing succeeds.
    */
   const openLayFileAndApply = useCallback(
-    async (file: File) => {
+    async (file: File, targetRecentEntryId?: string) => {
       // Claim a new document session generation immediately so any in-flight startup recovery cannot overwrite
       const openGen = ++documentSessionGenRef.current;
       hasUserReplacedOrEditedDocRef.current = true;
@@ -1808,6 +1914,15 @@ export default function App() {
         // mobile browser or AI Studio preview remounts 2–3 seconds after returning from the file picker,
         // this opened document is seamlessly restored instead of reverting to a blank A0 layout.
         void persistCleanActiveDocumentCheckpoint(loadedDoc, 0, [], []);
+        void recordRecentAndSyncState({
+          doc: loadedDoc,
+          filename: file.name || `${loadedDoc.name}.lay`,
+          fileHandle: null,
+          layBlob: file,
+          fileSizeBytes: file.size,
+          action: 'opened',
+          targetRecentEntryId,
+        });
         setLastSavedAt(null);
         logDocumentLifecycle('open-lay-file-applied', loadedDoc, { openGen });
         setTimeout(() => {
@@ -1828,12 +1943,238 @@ export default function App() {
       fitPageToWorkspace,
       markClean,
       persistCleanActiveDocumentCheckpoint,
+      recordRecentAndSyncState,
+      showToast,
+    ]
+  );
+
+  /**
+   * Explicitly opens the locally cached `.lay` Blob copy when the user clicks "Open Local Copy"
+   * inside `ReopenRecentModal` (for example, after `NotFoundError` or `permission-denied` on a stored handle).
+   */
+  const handleOpenRecentCachedCopy = useCallback(
+    async (entry: RecentDocumentEntry) => {
+      setReopenRecentModalState({
+        isOpen: false,
+        entry: null,
+        reasonMessage: null,
+        canOpenLocalCopy: false,
+      });
+
+      const openAttemptGen = ++documentSessionGenRef.current;
+      const cachedRes = await tryReopenRecentFromCachedBlob(entry);
+
+      if (cachedRes.status === 'opened-cached') {
+        if (documentSessionGenRef.current !== openAttemptGen) return;
+        const loaded = cachedRes.doc;
+        hasUserReplacedOrEditedDocRef.current = true;
+        docRef.current = loaded;
+        activePageIndexRef.current = 0;
+        setDoc(loaded);
+        // A cached copy is a local browser snapshot, not a live writable disk handle
+        setActiveFileHandle(null);
+        setActivePageIndex(0);
+        setSelectedObjectId(null);
+        setSelectedObjectIds([]);
+        setSelectedGuideId(null);
+        setCroppingImageId(null);
+        setEditingTextId(null);
+        setIsRecoveryModalOpen(false);
+        setRecoveryDraftSummary(null);
+        clearHistory();
+        markClean(true);
+        void persistCleanActiveDocumentCheckpoint(loaded, 0, [], []);
+        void recordRecentAndSyncState({
+          doc: loaded,
+          filename: cachedRes.filename,
+          fileHandle: null,
+          layBlob: cachedRes.cachedBlob,
+          fileSizeBytes: cachedRes.cachedBlob.size,
+          action: 'opened',
+          targetRecentEntryId: entry.id,
+        });
+        setLastSavedAt(null);
+        logDocumentLifecycle('opened-recent-lay-via-cached-copy', loaded, {
+          entryId: entry.id,
+        });
+        setTimeout(() => {
+          fitPageToWorkspace(loaded.widthMm, loaded.heightMm, 'page');
+        }, 50);
+        showToast(
+          `Opened local copy of "${cachedRes.filename}" — Save will ask you to choose a destination`
+        );
+        return;
+      }
+
+      setRecentDocuments(cachedRes.updatedEntries);
+      showToast(cachedRes.message, 'error');
+    },
+    [
+      clearHistory,
+      fitPageToWorkspace,
+      markClean,
+      persistCleanActiveDocumentCheckpoint,
+      recordRecentAndSyncState,
+      showToast,
+    ]
+  );
+
+  /**
+   * Reopens a recent `.lay` document using the 3-tier priority:
+   * 1. Stored `FileSystemFileHandle` (where available & accessible).
+   * 2. Locally cached `.lay` Blob copy in IndexedDB (`pagelay_recent_files_v1`).
+   * 3. Manual file reselection (`ReopenRecentModal`) only when neither is available or when
+   *    `NotFoundError` / `permission-denied` occurred on a stored handle.
+   * Never replaces or discards the current document if reopening fails or is cancelled.
+   */
+  const executeOpenRecentEntry = useCallback(
+    async (entry: RecentDocumentEntry) => {
+      const openAttemptGen = ++documentSessionGenRef.current;
+      const reopenRes = await tryReopenRecentDocument(entry);
+
+      if (reopenRes.status === 'opened-handle') {
+        if (documentSessionGenRef.current !== openAttemptGen) {
+          logDocumentLifecycle(
+            'open-recent-handle-ignored-stale-generation',
+            reopenRes.doc,
+            { openAttemptGen, currentGen: documentSessionGenRef.current }
+          );
+          return;
+        }
+        const loaded = reopenRes.doc;
+        hasUserReplacedOrEditedDocRef.current = true;
+        docRef.current = loaded;
+        activePageIndexRef.current = 0;
+        setDoc(loaded);
+        setActiveFileHandle(reopenRes.fileHandle);
+        setActivePageIndex(0);
+        setSelectedObjectId(null);
+        setSelectedObjectIds([]);
+        setSelectedGuideId(null);
+        setCroppingImageId(null);
+        setEditingTextId(null);
+        setIsRecoveryModalOpen(false);
+        setRecoveryDraftSummary(null);
+        clearHistory();
+        markClean(true);
+        void persistCleanActiveDocumentCheckpoint(loaded, 0, [], []);
+        void recordRecentAndSyncState({
+          doc: loaded,
+          filename: reopenRes.filename,
+          fileHandle: reopenRes.fileHandle,
+          layBlob: reopenRes.layBlob,
+          fileSizeBytes: reopenRes.layBlob.size,
+          action: 'opened',
+          targetRecentEntryId: entry.id,
+        });
+        setLastSavedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        );
+        logDocumentLifecycle('opened-recent-lay-via-stored-handle', loaded, {
+          entryId: entry.id,
+        });
+        setTimeout(() => {
+          fitPageToWorkspace(loaded.widthMm, loaded.heightMm, 'page');
+        }, 50);
+        showToast(`Opened "${reopenRes.filename}"`);
+        return;
+      }
+
+      if (reopenRes.status === 'opened-cached') {
+        if (documentSessionGenRef.current !== openAttemptGen) {
+          logDocumentLifecycle(
+            'open-recent-cached-ignored-stale-generation',
+            reopenRes.doc,
+            { openAttemptGen, currentGen: documentSessionGenRef.current }
+          );
+          return;
+        }
+        const loaded = reopenRes.doc;
+        hasUserReplacedOrEditedDocRef.current = true;
+        docRef.current = loaded;
+        activePageIndexRef.current = 0;
+        setDoc(loaded);
+        // A cached copy is a local snapshot; never silently overwrite another file on Save
+        setActiveFileHandle(null);
+        setActivePageIndex(0);
+        setSelectedObjectId(null);
+        setSelectedObjectIds([]);
+        setSelectedGuideId(null);
+        setCroppingImageId(null);
+        setEditingTextId(null);
+        setIsRecoveryModalOpen(false);
+        setRecoveryDraftSummary(null);
+        clearHistory();
+        markClean(true);
+        void persistCleanActiveDocumentCheckpoint(loaded, 0, [], []);
+        void recordRecentAndSyncState({
+          doc: loaded,
+          filename: reopenRes.filename,
+          fileHandle: null,
+          layBlob: reopenRes.cachedBlob,
+          fileSizeBytes: reopenRes.cachedBlob.size,
+          action: 'opened',
+          targetRecentEntryId: entry.id,
+        });
+        setLastSavedAt(null);
+        logDocumentLifecycle('opened-recent-lay-via-cached-copy', loaded, {
+          entryId: entry.id,
+        });
+        setTimeout(() => {
+          fitPageToWorkspace(loaded.widthMm, loaded.heightMm, 'page');
+        }, 50);
+        showToast(
+          `Opened local copy of "${reopenRes.filename}" — Save will ask you to choose a destination`
+        );
+        return;
+      }
+
+      if (reopenRes.status === 'not-found-removed') {
+        setRecentDocuments(reopenRes.updatedEntries);
+        showToast(reopenRes.message, 'error');
+        return;
+      }
+
+      if (reopenRes.status === 'not-found-has-cache') {
+        setRecentDocuments(reopenRes.updatedEntries);
+        setReopenRecentModalState({
+          isOpen: true,
+          entry: reopenRes.updatedEntry,
+          reasonMessage: reopenRes.message,
+          canOpenLocalCopy: true,
+        });
+        return;
+      }
+
+      if (reopenRes.status === 'corrupt-file') {
+        showToast(reopenRes.message, 'error');
+        return;
+      }
+
+      // Neither a usable handle nor a cached copy is available (or handle permission was denied):
+      if (reopenRes.updatedEntries) {
+        setRecentDocuments(reopenRes.updatedEntries);
+      }
+      setReopenRecentModalState({
+        isOpen: true,
+        entry,
+        reasonMessage: reopenRes.message,
+        canOpenLocalCopy: reopenRes.hasCachedCopy,
+      });
+    },
+    [
+      clearHistory,
+      fitPageToWorkspace,
+      markClean,
+      persistCleanActiveDocumentCheckpoint,
+      recordRecentAndSyncState,
       showToast,
     ]
   );
 
   /**
    * Immediately loads the rich A0 Exhibition Stand Layout sample document.
+   * Note: Does NOT add Sample A0 to Recent Documents until the user explicitly saves it as a `.lay` file.
    */
   const loadSampleDocumentImmediate = useCallback(async () => {
     const sampleGen = ++documentSessionGenRef.current;
@@ -1929,6 +2270,7 @@ export default function App() {
         }
         case 'open-picker': {
           newModalAuthorisedRef.current = false;
+          pendingReopenRecentEntryIdRef.current = undefined;
           // Synchronously check if native picker is usable in this frame before awaiting any promise
           // so `<input type="file">` is triggered directly inside the user's tap gesture on mobile.
           if (!canUseNativeOpenFilePickerSync()) {
@@ -1946,6 +2288,11 @@ export default function App() {
           await openLayFileAndApply(action.file);
           return;
         }
+        case 'open-recent': {
+          newModalAuthorisedRef.current = false;
+          await executeOpenRecentEntry(action.entry);
+          return;
+        }
         case 'load-sample': {
           newModalAuthorisedRef.current = false;
           setIsNewModalOpen(false);
@@ -1956,6 +2303,7 @@ export default function App() {
     },
     [
       clearHistory,
+      executeOpenRecentEntry,
       fitPageToWorkspace,
       handleTriggerOpenNativePicker,
       loadSampleDocumentImmediate,
@@ -2216,7 +2564,7 @@ export default function App() {
           e.target.value = '';
         }}
       />
-      {/* Hidden .lay File Picker for Fallback Open After Unsaved Changes Check */}
+      {/* Hidden .lay File Picker for Fallback Open & Reselected Recent Open */}
       <input
         ref={hiddenLayInputRef}
         type="file"
@@ -2224,8 +2572,10 @@ export default function App() {
         className="hidden"
         onChange={(e) => {
           const file = e.target.files?.[0];
+          const targetRecentId = pendingReopenRecentEntryIdRef.current;
+          pendingReopenRecentEntryIdRef.current = undefined;
           if (file) {
-            void openLayFileAndApply(file);
+            void openLayFileAndApply(file, targetRecentId);
           }
           e.target.value = '';
         }}
@@ -2265,9 +2615,19 @@ export default function App() {
         onRedo={handleRedo}
         onNewDocument={() => requestDocumentReplacement({ type: 'open-new-modal' })}
         onRequestOpenDocument={() => requestDocumentReplacement({ type: 'open-picker' })}
-        onTriggerOpenNativePicker={handleTriggerOpenNativePicker}
+        onTriggerOpenNativePicker={() => handleTriggerOpenNativePicker()}
         onOpenLayFile={(file) => {
           requestDocumentReplacement({ type: 'open-file', file });
+        }}
+        recentDocuments={recentDocuments}
+        onSelectRecentDocument={(entry) => {
+          requestDocumentReplacement({ type: 'open-recent', entry });
+        }}
+        onRemoveRecentDocument={(entryId) => {
+          void handleRemoveRecentDocument(entryId);
+        }}
+        onClearRecentDocuments={() => {
+          void handleClearRecentDocuments();
         }}
         onSaveLayFile={() => {
           void handleSaveDocument();
@@ -2789,8 +3149,17 @@ export default function App() {
           setIsUnsavedModalOpen(false);
           setPendingReplacementAction(null);
           pendingReplacementRef.current = null;
-          markClean();
-          void resolveAndClearRecoveryDraft();
+          // For actions that open a file chooser or recent file (which might be cancelled or fail),
+          // keep the current document and its recovery draft intact until the replacement file is actually loaded.
+          if (
+            pending &&
+            pending.type !== 'open-picker' &&
+            pending.type !== 'open-recent' &&
+            pending.type !== 'open-new-modal'
+          ) {
+            markClean();
+            void resolveAndClearRecoveryDraft();
+          }
           if (pending) {
             void executeReplacementAction(pending);
           }
@@ -2817,6 +3186,51 @@ export default function App() {
         }}
       />
 
+      <ReopenRecentModal
+        isOpen={reopenRecentModalState.isOpen}
+        entry={reopenRecentModalState.entry}
+        reasonMessage={reopenRecentModalState.reasonMessage}
+        canOpenLocalCopy={reopenRecentModalState.canOpenLocalCopy}
+        onOpenLocalCopy={(targetEntry) => {
+          void handleOpenRecentCachedCopy(targetEntry);
+        }}
+        onClose={() => {
+          pendingReopenRecentEntryIdRef.current = undefined;
+          setReopenRecentModalState({
+            isOpen: false,
+            entry: null,
+            reasonMessage: null,
+            canOpenLocalCopy: false,
+          });
+        }}
+        onRemoveEntry={(entryId) => {
+          void handleRemoveRecentDocument(entryId);
+        }}
+        onChooseFileToReopen={() => {
+          const targetEntry = reopenRecentModalState.entry;
+          const entryId = targetEntry?.id;
+          setReopenRecentModalState({
+            isOpen: false,
+            entry: null,
+            reasonMessage: null,
+            canOpenLocalCopy: false,
+          });
+          // Trigger the file picker synchronously inside the user's click gesture on mobile / embedded preview
+          if (!canUseNativeOpenFilePickerSync()) {
+            pendingReopenRecentEntryIdRef.current = entryId;
+            hiddenLayInputRef.current?.click();
+            return;
+          }
+          void (async () => {
+            const useFallback = await handleTriggerOpenNativePicker(entryId);
+            if (useFallback) {
+              pendingReopenRecentEntryIdRef.current = entryId;
+              hiddenLayInputRef.current?.click();
+            }
+          })();
+        }}
+      />
+
       <SaveAsModal
         isOpen={isSaveAsModalOpen}
         currentName={doc.name}
@@ -2831,7 +3245,14 @@ export default function App() {
           setIsSaveAsModalOpen(false);
           setPendingReplacementAction(null);
           pendingReplacementRef.current = null;
-          void resolveAndClearRecoveryDraft();
+          if (
+            pending &&
+            pending.type !== 'open-picker' &&
+            pending.type !== 'open-recent' &&
+            pending.type !== 'open-new-modal'
+          ) {
+            void resolveAndClearRecoveryDraft();
+          }
           if (pending) {
             void executeReplacementAction(pending);
           }
@@ -2875,6 +3296,15 @@ export default function App() {
               historyPastRef.current,
               historyFutureRef.current
             );
+            void recordRecentAndSyncState({
+              doc: updatedDoc,
+              filename: res.filename,
+              fileHandle: res.status === 'saved-native' ? res.fileHandle : null,
+              layBlob: res.layBlob ?? null,
+              fileSizeBytes: res.layBlob?.size,
+              action:
+                res.status === 'saved-native' ? 'saved' : 'saved-download',
+            });
             setLastSavedAt(
               new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             );

@@ -423,12 +423,68 @@
   - **4. Concise Lifecycle Diagnostics (`logDocumentLifecycle` in `src/App.tsx`)**:
     - Added structured `[PageLay Lifecycle]` console diagnostics tracing initial blank state creation, startup recovery checks, `.lay` file open start/apply, clean session checkpoint persistence, and recovery draft clearing.
 
+### Milestone 28 — Desktop Mouse Wheel Navigation Refinement
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Desktop Mouse Wheel Navigation"*
+- **Engineering Changes**:
+  - Updated `handleWheel` in `src/components/EditorCanvas.tsx`:
+    - **`Ctrl + Wheel` (including `Ctrl + Shift + Wheel`)**: Returns immediately without calling `e.preventDefault()`, allowing the browser's normal page/tab zoom.
+    - **`Shift + Wheel`**: Zooms PageLay's canvas in/out centred around the mouse pointer (`e.deltaY !== 0 ? e.deltaY : e.deltaX`) using `onZoomChange` and `onPanChange`.
+    - **`Alt + Wheel`**: Pans the canvas horizontally (`panX - panDelta`).
+    - **`Wheel` alone**: Pans vertically (and preserves normal horizontal trackpad two-finger panning when `deltaX` is present).
+
+### Milestone 29 — Open Recent Documents (Maximum 10 Documents)
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Implement Open Recent (Maximum 10 Documents)"*
+- **Engineering Changes**:
+  - **1. Dedicated Recent Files Service (`src/services/recentFilesService.ts`)**:
+    - Implemented `MAX_RECENT_DOCUMENTS = 10`, `RecentDocumentEntry`, `loadRecentDocuments`, `recordRecentDocument`, `removeRecentDocumentEntry`, `clearAllRecentDocuments`, `tryReopenRecentFromStoredHandle`, and `formatRecentTimestamp`.
+    - Stores lightweight metadata (`id`, `filename`, `documentName`, `documentId`, `lastOpenedOrSavedAt`, `paperSize`, `orientation`, `hasStoredHandle`) in `window.localStorage` (`pagelay_recent_documents_v1`).
+    - Persists structured-cloneable `FileSystemFileHandle` references in a dedicated IndexedDB database (`pagelay_recent_files_v1` / store `recent_handles`) strictly separated from `pagelay_local_recovery_v1`, never storing `.lay` ZIP archives or binary image assets.
+    - Deduplicates using `FileSystemFileHandle.isSameEntry()` when handles exist or `(documentId + filename)` when handles do not exist, without falsely merging two different files that merely share a filename.
+  - **2. File Menu & Desktop Toolbar Integration (`src/components/TopToolbar.tsx`)**:
+    - Updated the mobile `File` menu in exact order:
+      1. `New Document`
+      2. `Open .lay Document`
+      3. `Open Recent` (inline collapsible list with touch scrolling, entry remove button, and two-step `Clear Recent History`)
+      4. `Save`
+      5. `Save As`
+      6. `Sample A0`
+    - Added a compact `Recent` dropdown button immediately beside `Open` on the desktop toolbar while retaining the existing inline `New` / `Open` / `Save` / `Save As...` / `Sample A0` controls.
+  - **3. Direct Handle Reopen, Mobile Fallback Modal & Unsaved Changes Guard (`src/App.tsx`, `src/components/Modals.tsx`)**:
+    - Routed all Open Recent selections through `requestDocumentReplacement({ type: 'open-recent', entry })` so dirty documents always show the `Save changes before continuing?` modal (`Save`, `Don't Save`, `Cancel`).
+    - When a stored desktop `FileSystemFileHandle` is available and granted permission, `tryReopenRecentFromStoredHandle` reads and parses the `.lay` file directly and retains the writable handle for subsequent `Save` operations.
+    - When no handle is stored (mobile Android/iPhone, embedded preview, or download fallback) or when a file was moved, deleted, or had permissions revoked, opens `ReopenRecentModal` with **"Choose File to Reopen"** to launch the file picker directly from a trusted user click gesture without discarding the current document if cancelled.
+
+### Milestone 30 — Genuine Quick Reopen & Local `.lay` Caching for Open Recent
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Make Open Recent Actually Reopen Documents"*
+- **Engineering Changes**:
+  - **1. Three-Tier Quick Reopen Priority (`src/services/recentFilesService.ts`, `src/App.tsx`)**:
+    1. **Direct Original File Handle**: Where a valid `FileSystemFileHandle` exists and is supported in the current browser context, reopens the original file directly from disk and retains the writable handle for subsequent `Save` operations.
+    2. **Locally Cached `.lay` Copy**: Where a persistent file handle is unavailable (such as in Google AI Studio's embedded preview, mobile Android/iPhone browsers, drag-and-drop opens, or download-based saves), immediately reopens the locally cached `.lay` binary snapshot with a single click (`activeFileHandle = null`, clearly notifying the user that `Save` will ask to choose a destination rather than silently overwriting a disk file).
+    3. **Manual Reselection (`ReopenRecentModal`)**: Only prompts the user to locate the file when neither a usable handle nor a cached local copy is available (or when a stored handle encountered `NotFoundError` or `permission-denied`).
+  - **2. Quota-Checked Local `.lay` Binary Caching (`pagelay_recent_files_v1` / `recent_blobs`)**:
+    - Added the `recent_blobs` object store in `pagelay_recent_files_v1` (strictly separate from `pagelay_local_recovery_v1`), storing the untouched `.lay` `Blob` on Open, Save, Save As, and download-based Save without altering original image bytes or document geometry.
+    - Enforces conservative per-file (`MAX_SINGLE_CACHED_LAY_BYTES = 25 MB`), total-cache (`MAX_TOTAL_CACHED_LAY_BYTES = 80 MB`), and free browser storage headroom (`MIN_FREE_QUOTA_HEADROOM_BYTES = 60 MB`) limits via `navigator.storage.estimate()` so `pagelay_local_recovery_v1` recovery checkpoints are never compromised.
+    - Automatically removes obsolete cached `.lay` blobs when an entry is removed, pruned past 10 entries, or cleared.
+  - **3. Missing File (`NotFoundError`) Handling & Honest Status Labels (`src/components/TopToolbar.tsx`, `src/components/Modals.tsx`)**:
+    - When a stored `FileSystemFileHandle` throws `NotFoundError`, notifies the user that the original file no longer exists; automatically removes the invalid recent entry if no cached copy exists, or retains the entry and offers **"Open Local Copy"** in `ReopenRecentModal` if a cached snapshot is available.
+    - Updated the Recent list UI in `TopToolbar.tsx` to clearly distinguish **`Open directly`** (accessible original file), **`Local copy`** (cached version available), and **`Locate file`** (neither available).
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference
 
 | Shortcut | Action |
 | :--- | :--- |
+| `Wheel` | Pan canvas vertically (and horizontally on 2-axis trackpads) |
+| `Alt + Wheel` | Pan canvas horizontally |
+| `Shift + Wheel` | Zoom canvas in / out centred around the mouse pointer |
+| `Ctrl + Wheel` | Native browser tab / page zoom (not intercepted by PageLay) |
 | `Ctrl + Click` / `⌘ + Click` (or `Shift + Click`) | Add or toggle multiple objects in selection on the canvas |
 | `Shift + Rotate` | Constrain object/group rotation to configured angle increment (`1°`–`45°`, default `15°`) |
 | `Shift + Drag` (Line / Arrow / Dimension) | Snap start point to `1 mm`, physical length to `1 mm`, and angle to configured increment + cardinal axes |
@@ -458,6 +514,7 @@
 | Canonical `mm` Data Model | `src/model/documentTypes.ts`, `src/utils/units.ts` | Verified | ISO A0–A4 + Custom sizes, `GroupObject`, `FreehandStrokeObject`, DPI math |
 | Zoom-Invariant Canvas | `src/components/EditorCanvas.tsx` | Verified | 1:1 `mm` layout scaled via GPU compositor |
 | Mobile Touch & Pinch Zoom | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1-finger pan, 2-finger pinch zoom & focal pan, multi-touch stroke cancel |
+| Desktop Mouse Wheel Navigation | `src/components/EditorCanvas.tsx` | Verified | `Wheel` vertical pan, `Alt+Wheel` horizontal pan, `Shift+Wheel` pointer-centred zoom, `Ctrl+Wheel` native browser zoom |
 | Viewport & Overflow Lock | `index.html`, `src/index.css`, `src/App.tsx` | Verified | `100dvh` lock, `overscroll-none`, isolated drawer positioning |
 | Ruler & Guideline Isolation | `src/components/Rulers.tsx`, `src/components/EditorCanvas.tsx` | Verified | Target & coordinate checks prevent accidental page pan |
 | Magnetic Snap to Objects | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx` | Verified | Snaps to edges & centres of other objects + TopToolbar toggle |
@@ -467,5 +524,7 @@
 | Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx` | Verified | `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
 | Undo/Redo & Keyboard Shortcuts Suite | `src/App.tsx`, `src/components/EditorCanvas.tsx` | Verified | Pre-drag history snapshots, Undo (`Ctrl+Z`), Redo (`Ctrl+Y`/`Ctrl+Shift+Z`), Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
 | `.lay` Archive Save / Save As / Open & Page Import | `src/services/layFileService.ts`, `src/components/PagesSidebar.tsx`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation, sidebar `.lay` page import |
+| Open Recent Documents (Max 10) | `src/services/recentFilesService.ts`, `src/components/TopToolbar.tsx`, `src/components/Modals.tsx`, `src/App.tsx` | Verified | Metadata in `localStorage` + `FileSystemFileHandle` in separate IndexedDB (`pagelay_recent_files_v1`), direct reopen on desktop, guided picker fallback on mobile |
 | Local Session Recovery & Undo/Redo Persistence | `src/services/recoveryDraftService.ts`, `src/App.tsx`, `src/components/Modals.tsx` | Verified | Quiet same-tab reload recovery (`sessionStorage` + IndexedDB), full `historyPast`/`historyFuture` & deleted image asset retention, "Continue editing your document?" modal |
 | Vector PDF & High-DPI Export | `src/services/pdfExportService.ts`, `src/services/imageExportService.ts` | Verified | `pdf-lib` vector output + 72/150/300 DPI PNG/JPG |
+

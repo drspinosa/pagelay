@@ -45,6 +45,10 @@ import {
   FolderClosed,
   Compass,
   Crosshair,
+  Clock,
+  X,
+  Trash2,
+  ChevronRight,
 } from 'lucide-react';
 import {
   FREEHAND_HIGHLIGHTER_PRESETS,
@@ -52,6 +56,11 @@ import {
   PEN_COLOR_PRESETS,
   ToolType,
 } from '../model/documentTypes';
+import {
+  formatRecentTimestamp,
+  getRecentEntryAvailabilityStatus,
+  RecentDocumentEntry,
+} from '../services/recentFilesService';
 
 interface TopToolbarProps {
   documentName: string;
@@ -76,6 +85,10 @@ interface TopToolbarProps {
   onRequestOpenDocument?: () => void;
   onOpenLayFile: (file: File) => void;
   onTriggerOpenNativePicker?: () => Promise<boolean>;
+  recentDocuments: RecentDocumentEntry[];
+  onSelectRecentDocument: (entry: RecentDocumentEntry) => void;
+  onRemoveRecentDocument: (entryId: string) => void;
+  onClearRecentDocuments: () => void;
   onSaveLayFile: () => void;
   onSaveAsLayFile: () => void;
   onLoadSampleDocument: () => void;
@@ -105,6 +118,7 @@ interface TopToolbarProps {
 
 type DropdownMenuType =
   | 'file'
+  | 'recent'
   | 'shape'
   | 'highlight'
   | 'pen'
@@ -116,7 +130,8 @@ type ShapeToolType = 'rectangle' | 'square' | 'ellipse' | 'circle' | 'triangle';
 const ANGLE_SNAP_PRESETS = [1, 5, 10, 15, 30, 45] as const;
 
 const EXPECTED_MENU_WIDTH: Record<DropdownMenuType, number> = {
-  file: 224,
+  file: 280,
+  recent: 304,
   pen: 256,
   'freehand-highlighter': 256,
   shape: 184,
@@ -160,6 +175,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   onRequestOpenDocument,
   onOpenLayFile,
   onTriggerOpenNativePicker,
+  recentDocuments,
+  onSelectRecentDocument,
+  onRemoveRecentDocument,
+  onClearRecentDocuments,
   onSaveLayFile,
   onSaveAsLayFile,
   onLoadSampleDocument,
@@ -193,6 +212,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
   // Trigger refs for each dropdown menu so popovers position directly below their button
   const fileTriggerRef = useRef<HTMLButtonElement>(null);
+  const recentTriggerRef = useRef<HTMLButtonElement>(null);
   const penTriggerRef = useRef<HTMLDivElement>(null);
   const freehandHighlighterTriggerRef = useRef<HTMLDivElement>(null);
   const shapeTriggerRef = useRef<HTMLDivElement>(null);
@@ -200,6 +220,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   const guidesTriggerRef = useRef<HTMLButtonElement>(null);
 
   const [openMenu, setOpenMenu] = useState<DropdownMenuType | null>(null);
+  const [isMobileRecentExpanded, setIsMobileRecentExpanded] =
+    useState<boolean>(false);
+  const [isConfirmingClearRecent, setIsConfirmingClearRecent] =
+    useState<boolean>(false);
   const [menuPosition, setMenuPosition] = useState<{
     top: number;
     left: number;
@@ -250,6 +274,8 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
       switch (menu) {
         case 'file':
           return fileTriggerRef.current;
+        case 'recent':
+          return recentTriggerRef.current;
         case 'pen':
           return penTriggerRef.current;
         case 'freehand-highlighter':
@@ -302,6 +328,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
   const toggleMenu = useCallback(
     (menu: DropdownMenuType) => {
+      setIsConfirmingClearRecent(false);
       setOpenMenu((prev) => {
         if (prev === menu) return null;
         setMenuPosition(computeMenuCoords(menu));
@@ -313,13 +340,17 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
   const openSpecificMenu = useCallback(
     (menu: DropdownMenuType) => {
+      setIsConfirmingClearRecent(false);
       setMenuPosition(computeMenuCoords(menu));
       setOpenMenu(menu);
     },
     [computeMenuCoords]
   );
 
-  const closeAllMenus = useCallback(() => setOpenMenu(null), []);
+  const closeAllMenus = useCallback(() => {
+    setIsConfirmingClearRecent(false);
+    setOpenMenu(null);
+  }, []);
 
   // Keep open dropdown anchored beneath its trigger button on resize and horizontal toolbar scroll
   useLayoutEffect(() => {
@@ -387,10 +418,154 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
     SHAPE_MENU_ITEMS[0];
   const CurrentShapeIcon = currentShapeMeta.icon;
 
+  const displayedRecentDocs = recentDocuments.slice(0, 10);
+
+  const renderRecentDocumentsList = (isMobileInline: boolean) => {
+    if (displayedRecentDocs.length === 0) {
+      return (
+        <div
+          className={`px-3 py-3 text-center text-[11px] text-slate-400 ${
+            isMobileInline ? 'bg-slate-50/80 border-y border-slate-100' : ''
+          }`}
+        >
+          No recent documents yet.
+        </div>
+      );
+    }
+
+    return (
+      <div
+        className={
+          isMobileInline
+            ? 'bg-slate-50/80 border-y border-slate-100 py-1'
+            : 'py-0.5'
+        }
+      >
+        <div
+          data-allow-touch-scroll="true"
+          className={
+            isMobileInline
+              ? 'max-h-52 overflow-y-auto overscroll-contain touch-pan-y divide-y divide-slate-100'
+              : 'max-h-72 overflow-y-auto overscroll-contain touch-pan-y divide-y divide-slate-100'
+          }
+        >
+          {displayedRecentDocs.map((entry) => {
+            const timeLabel = formatRecentTimestamp(entry.lastAccessedAtMs);
+            const availability = getRecentEntryAvailabilityStatus(entry);
+            return (
+              <div
+                key={entry.id}
+                className="flex items-stretch justify-between hover:bg-slate-100/90 transition-colors group"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeAllMenus();
+                    onSelectRecentDocument(entry);
+                  }}
+                  className="flex-1 min-w-0 px-3 py-2 text-left flex flex-col gap-0.5"
+                  title={`${entry.filename} — ${availability.label} (${availability.description})`}
+                >
+                  <div className="flex items-center justify-between gap-1.5 min-w-0">
+                    <span className="font-mono font-semibold text-xs text-slate-800 truncate">
+                      {entry.filename}
+                    </span>
+                    <span
+                      className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium leading-none border ${
+                        availability.status === 'open-directly'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200/80'
+                          : availability.status === 'local-copy'
+                          ? 'bg-blue-50 text-blue-700 border-blue-200/80'
+                          : 'bg-amber-50 text-amber-700 border-amber-200/80'
+                      }`}
+                    >
+                      {availability.label}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 truncate">
+                    {timeLabel && <span>{timeLabel}</span>}
+                    {entry.paperSize && (
+                      <>
+                        <span>·</span>
+                        <span className="font-mono">{entry.paperSize}</span>
+                      </>
+                    )}
+                  </div>
+                </button>
+
+                {/* Separated Remove button so selecting a document never triggers Remove accidentally */}
+                <div className="flex items-center pr-1.5 pl-1 border-l border-slate-100 shrink-0">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRemoveRecentDocument(entry.id);
+                    }}
+                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                    title={`Remove "${entry.filename}" from recent documents`}
+                    aria-label={`Remove ${entry.filename} from recent documents`}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Footer: Clear Recent History with 2-step confirmation to prevent accidental taps */}
+        <div className="px-2.5 pt-1.5 pb-1 border-t border-slate-200/80 flex items-center justify-between gap-2">
+          {isConfirmingClearRecent ? (
+            <div className="w-full flex items-center justify-between gap-1.5">
+              <span className="text-[10px] font-semibold text-rose-700 truncate">
+                Clear recent list?
+              </span>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsConfirmingClearRecent(false);
+                  }}
+                  className="px-2 py-1 text-[10px] font-medium text-slate-600 hover:bg-slate-200 rounded"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsConfirmingClearRecent(false);
+                    onClearRecentDocuments();
+                  }}
+                  className="px-2 py-1 text-[10px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded"
+                >
+                  Clear All
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsConfirmingClearRecent(true);
+              }}
+              className="w-full px-2 py-1 text-[11px] font-medium text-slate-500 hover:text-rose-700 hover:bg-rose-50/70 rounded flex items-center justify-center gap-1.5 transition-colors"
+            >
+              <Trash2 className="w-3 h-3" />
+              <span>Clear Recent History</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const dropdownPortalContent = openMenu ? (
     <>
-      {/* For non-drawing menus (File, Guides & Snap), provide a click-outside backdrop so dismissing never triggers canvas actions */}
-      {(openMenu === 'file' || openMenu === 'guides') && (
+      {/* For non-drawing menus (File, Recent, Guides & Snap), provide a click-outside backdrop so dismissing never triggers canvas actions */}
+      {(openMenu === 'file' || openMenu === 'recent' || openMenu === 'guides') && (
         <div
           className="fixed inset-0 z-40"
           onClick={closeAllMenus}
@@ -401,16 +576,19 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
       {openMenu === 'file' && (
         <div
           ref={menuPopoverRef}
+          role="menu"
+          data-allow-touch-scroll="true"
           style={{
             top: menuPosition.top,
             left: menuPosition.left,
             maxHeight: menuPosition.maxHeight,
           }}
-          className="fixed w-56 max-w-[calc(100vw-16px)] overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-xl py-1.5 z-50 text-xs"
+          className="fixed w-68 max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain touch-pan-y bg-white border border-slate-200 rounded-lg shadow-xl py-1.5 z-50 text-xs"
         >
           <div className="px-3 py-1 text-[11px] font-semibold text-slate-400">
             Document Actions
           </div>
+          {/* 1. New Document */}
           <button
             type="button"
             onClick={() => {
@@ -419,9 +597,11 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             }}
             className="w-full px-3 py-2 text-left flex items-center gap-2.5 hover:bg-slate-100 text-slate-700"
           >
-            <FilePlus2 className="w-4 h-4 text-slate-600" />
+            <FilePlus2 className="w-4 h-4 text-slate-600 shrink-0" />
             <span>New Document...</span>
           </button>
+
+          {/* 2. Open .lay Document */}
           <button
             type="button"
             onClick={async () => {
@@ -441,9 +621,42 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             }}
             className="w-full px-3 py-2 text-left flex items-center gap-2.5 hover:bg-slate-100 text-slate-700"
           >
-            <FolderOpen className="w-4 h-4 text-slate-600" />
+            <FolderOpen className="w-4 h-4 text-slate-600 shrink-0" />
             <span>Open .lay Document...</span>
           </button>
+
+          {/* 3. Open Recent (Expands inline inside the mobile File menu) */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsConfirmingClearRecent(false);
+              setIsMobileRecentExpanded((prev) => !prev);
+            }}
+            className="w-full px-3 py-2 text-left flex items-center justify-between gap-2 hover:bg-slate-100 text-slate-700"
+            aria-expanded={isMobileRecentExpanded}
+          >
+            <div className="flex items-center gap-2.5">
+              <Clock className="w-4 h-4 text-slate-600 shrink-0" />
+              <span>Open Recent</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {displayedRecentDocs.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 font-mono text-[10px] font-semibold leading-none">
+                  {displayedRecentDocs.length}
+                </span>
+              )}
+              {isMobileRecentExpanded ? (
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+              )}
+            </div>
+          </button>
+
+          {isMobileRecentExpanded && renderRecentDocumentsList(true)}
+
+          {/* 4. Save */}
           <button
             type="button"
             onClick={() => {
@@ -452,9 +665,11 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             }}
             className="w-full px-3 py-2 text-left flex items-center gap-2.5 hover:bg-slate-100 text-slate-800 font-medium"
           >
-            <Save className="w-4 h-4 text-slate-700" />
+            <Save className="w-4 h-4 text-slate-700 shrink-0" />
             <span>Save Editable .lay File</span>
           </button>
+
+          {/* 5. Save As */}
           <button
             type="button"
             onClick={() => {
@@ -463,10 +678,13 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             }}
             className="w-full px-3 py-2 text-left flex items-center gap-2.5 hover:bg-slate-100 text-slate-700"
           >
-            <Save className="w-4 h-4 text-slate-500" />
+            <Save className="w-4 h-4 text-slate-500 shrink-0" />
             <span>Save As...</span>
           </button>
+
           <div className="my-1 border-t border-slate-100" />
+
+          {/* 6. Sample A0 */}
           <button
             type="button"
             onClick={() => {
@@ -475,9 +693,34 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             }}
             className="w-full px-3 py-2 text-left flex items-center gap-2.5 hover:bg-blue-50 text-blue-700 font-medium"
           >
-            <LayoutGrid className="w-4 h-4 text-blue-600" />
+            <LayoutGrid className="w-4 h-4 text-blue-600 shrink-0" />
             <span>Load Sample A0 Stand Layout</span>
           </button>
+        </div>
+      )}
+
+      {/* Desktop Open Recent Dropdown Popover */}
+      {openMenu === 'recent' && (
+        <div
+          ref={menuPopoverRef}
+          role="menu"
+          data-allow-touch-scroll="true"
+          style={{
+            top: menuPosition.top,
+            left: menuPosition.left,
+            maxHeight: menuPosition.maxHeight,
+          }}
+          className="fixed w-76 max-w-[calc(100vw-16px)] overflow-hidden bg-white border border-slate-200 rounded-lg shadow-xl py-1.5 z-50 text-xs"
+        >
+          <div className="px-3 py-1.5 border-b border-slate-100 flex items-center justify-between">
+            <span className="text-[11px] font-semibold text-slate-700">
+              Open Recent (.lay)
+            </span>
+            <span className="font-mono text-[10px] text-slate-400">
+              {displayedRecentDocs.length} / 10
+            </span>
+          </div>
+          {renderRecentDocumentsList(false)}
         </div>
       )}
 
@@ -1120,6 +1363,38 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             >
               <FolderOpen className="w-3.5 h-3.5 text-slate-600" />
               <span>Open</span>
+            </button>
+
+            <button
+              ref={recentTriggerRef}
+              type="button"
+              onClick={() => toggleMenu('recent')}
+              className={`px-2 py-1 text-xs font-medium rounded flex items-center gap-1 transition-colors whitespace-nowrap ${
+                openMenu === 'recent'
+                  ? 'bg-slate-900 text-white'
+                  : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+              title="Open Recent .lay Documents"
+              aria-expanded={openMenu === 'recent'}
+            >
+              <Clock
+                className={`w-3.5 h-3.5 ${
+                  openMenu === 'recent' ? 'text-white' : 'text-slate-600'
+                }`}
+              />
+              <span>Recent</span>
+              {displayedRecentDocs.length > 0 && (
+                <span
+                  className={`px-1 py-0.2 rounded font-mono text-[10px] leading-tight ${
+                    openMenu === 'recent'
+                      ? 'bg-slate-700 text-white'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}
+                >
+                  {displayedRecentDocs.length}
+                </span>
+              )}
+              <ChevronDown className="w-3 h-3 opacity-70" />
             </button>
 
             <button
