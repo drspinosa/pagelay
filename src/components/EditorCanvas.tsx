@@ -2218,12 +2218,47 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   };
 
   const handleWheel = (e: React.WheelEvent) => {
-    if (e.ctrlKey || e.metaKey) {
+    // When Ctrl is pressed (including Ctrl + Wheel and Ctrl + Shift + Wheel),
+    // allow the browser's normal page/tab zoom without intercepting or preventing it.
+    if (e.ctrlKey) {
+      return;
+    }
+
+    // Only handle canvas navigation when the pointer event originates inside the workspace
+    const targetEl = e.target as HTMLElement | null;
+    if (
+      !workspaceRef.current ||
+      (targetEl && !workspaceRef.current.contains(targetEl)) ||
+      targetEl?.closest(
+        '[data-sidebar="true"], [role="dialog"], [role="menu"], [data-allow-touch-scroll="true"]'
+      )
+    ) {
+      return;
+    }
+
+    // Shift + Wheel: Zoom PageLay's canvas in/out, centred around the mouse pointer.
+    // Note: On Windows/macOS, holding Shift while turning a vertical mouse wheel may report the delta in deltaY or deltaX.
+    if (e.shiftKey) {
+      const zoomDelta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+      if (zoomDelta === 0) return;
       e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.12 : 0.89;
+      const factor = zoomDelta < 0 ? 1.12 : 0.89;
       const nextZoom = Math.min(4.0, Math.max(0.05, zoom * factor));
       onZoomChange(nextZoom, e.clientX, e.clientY);
-    } else {
+      return;
+    }
+
+    // Alt + Wheel: Pan horizontally across the canvas.
+    if (e.altKey) {
+      const horizontalDelta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+      if (horizontalDelta === 0) return;
+      e.preventDefault();
+      onPanChange(panX - horizontalDelta, panY);
+      return;
+    }
+
+    // Wheel alone (or 2D trackpad scroll): Pan vertically while keeping horizontal trackpad movement working.
+    if (e.deltaX !== 0 || e.deltaY !== 0) {
       onPanChange(panX - e.deltaX, panY - e.deltaY);
     }
   };
