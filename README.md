@@ -2,6 +2,8 @@
 
 > **Simple page layouts. No fuss.**
 
+Created and developed by **Adam Spinos**. Published by **Look4ideas Designs LLP**.
+
 **PageLay** is a fast, precision desktop-publishing and page-layout web application engineered for creating multi-page exhibition boards, technical sheets, architectural layouts, and visual callout documents using **canonical millimetre (`mm`) coordinates** and **100% lossless original image preservation**.
 
 All operations run locally in your browser with zero external cloud dependencies, accounts, or servers.
@@ -156,3 +158,41 @@ The `webpage/` folder is excluded from Git locally and should not be committed t
     └── utils/
         └── units.ts                # Millimetre/point/pixel conversions, DPI math, group transforms
 ```
+
+## Credits
+
+- **Product:** PageLay
+- **Creator and developer:** Adam Spinos
+- **Publisher:** Look4ideas Designs LLP (Companies House number OC354341)
+
+## Licence
+
+The PageLay **source code** is released under the [MIT License](LICENSE).
+
+You may use, copy, modify, merge, publish, distribute, sublicense and sell the source code, including for commercial purposes, provided that the copyright notice and the MIT licence text are included in all copies or substantial portions of the software. The software is provided "as is", without warranty of any kind; see [LICENSE](LICENSE) for the full terms.
+
+Visible attribution, such as a credit or a link back to [the PageLay repository](https://github.com/drspinosa/pagelay), is appreciated but is not a requirement of the MIT License.
+
+### Name, logo and branding
+
+The MIT License is intended to cover the PageLay source code only. It is not intended to grant any rights to the PageLay name, logo or visual branding. The following files are PageLay branding assets and are excluded from the MIT grant:
+
+- `public/favicon.svg`
+- `public/favicon.ico`
+- `public/apple-touch-icon.png`
+
+Factual references to PageLay and truthful compatibility statements are welcome. See [TRADEMARKS.md](TRADEMARKS.md) for how the name and branding may be used, including guidance for forks.
+
+### Your documents
+
+You keep whatever rights you already have in the documents you create with PageLay, including `.lay` files and exported PDF, PNG and JPG files. PageLay, Adam Spinos and Look4ideas Designs LLP do not claim ownership of your documents, and you are free to share and use them, including commercially. Any third-party material you place in a document, such as images or fonts, remains subject to its own terms.
+
+### The `.lay` file format
+
+`.lay` is PageLay's native document format: a ZIP archive containing a `manifest.json` file that describes the document, together with the original bytes of each embedded image in an `assets/` folder. The code that reads and writes `.lay` files is part of the MIT-licensed source code.
+
+Anyone may create, open and exchange `.lay` files, and other software may read or write them. PageLay does not claim exclusive ownership of the format and does not charge for compatibility. Describing other software as official, certified or endorsed by PageLay is covered by [TRADEMARKS.md](TRADEMARKS.md).
+
+### Third-party software
+
+PageLay uses open-source packages, each under its own licence; see `package-lock.json`. A consolidated third-party licence notices file for the built application has not yet been added.
