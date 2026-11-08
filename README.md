@@ -67,7 +67,7 @@ All operations run locally in your browser with zero external cloud dependencies
 ## Getting Started
 
 ### Prerequisites
-- **Node.js** 18+ (or **Bun**)
+- **Node.js** 24 LTS recommended (Vite 8 requires Node.js 20.19+ or 22.12+). Bun is also supported.
 
 ### Installation & Local Development
 ```bash
