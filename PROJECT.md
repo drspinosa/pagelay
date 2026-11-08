@@ -508,6 +508,37 @@
 
 ---
 
+
+### Milestone 33 — First Public Deployment (8 November 2026)
+- **Status**: Completed
+- **Public URL**: https://pagelay.look4ideas.com
+- **Hosting**: IONOS static web hosting, deployed via FTP.
+- **Development Environment**: VS Code, Windows, Node.js, React, TypeScript and Vite.
+- **Source Control**: GitHub — `drspinosa/pagelay`.
+- **Deployment Process**:
+  - Validated TypeScript using `npm.cmd run lint`.
+  - Generated production files using `npm.cmd run build`.
+  - Copied `dist/` contents to the locally excluded `webpage/` deployment folder.
+  - Uploaded the production files to the IONOS subdomain document root using FTP.
+- **Release Features**:
+  - Responsive desktop and mobile page-layout editor.
+  - A0–A4 and custom page dimensions with millimetre-based precision.
+  - Drawing, annotation, image placement and multi-page layouts.
+  - Editable `.lay` files, Open Recent and browser-based recovery.
+  - Vector PDF and high-resolution image export.
+  - Integrated searchable Help & How To manual.
+  - PageLay favicon and mobile home-screen icon.
+- **Verification**:
+  - Production build and TypeScript validation passed.
+  - Public application loaded successfully.
+  - Desktop ribbon and Help manual tested locally.
+  - Favicon confirmed working on the public website.
+- **Future Improvements**:
+  - Further mobile/browser compatibility testing.
+  - Optional annotated Help illustrations.
+  - Continued refinement based on user feedback.
+
+
 ## 3. Keyboard & Mouse Shortcuts Reference
 
 | Shortcut | Action |
