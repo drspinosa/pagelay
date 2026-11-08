@@ -48,6 +48,7 @@ import {
   Clock,
   X,
   Trash2,
+  ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
 import {
@@ -152,6 +153,20 @@ const SHAPE_MENU_ITEMS: ReadonlyArray<{
   { id: 'triangle', buttonLabel: 'Triangle', menuLabel: 'Triangle', icon: Triangle },
 ];
 
+/**
+ * Detects desktop/laptop environments with a fine pointer (mouse/trackpad) and hover capability,
+ * while excluding phones and touch-first tablets (`pointer: coarse`) so mobile finger-swipe
+ * ribbon behaviour remains completely untouched.
+ */
+function detectDesktopFinePointer(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  const hasFineHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  const isPrimaryCoarse = window.matchMedia('(pointer: coarse)').matches;
+  return hasFineHover && !isPrimaryCoarse;
+}
+
 export const TopToolbar: React.FC<TopToolbarProps> = ({
   documentName,
   onChangeDocumentName,
@@ -207,7 +222,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 }) => {
   const layInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const ribbonWrapperRef = useRef<HTMLDivElement>(null);
   const toolStripRef = useRef<HTMLDivElement>(null);
+  const ribbonScrollLeftBtnRef = useRef<HTMLButtonElement>(null);
+  const ribbonScrollRightBtnRef = useRef<HTMLButtonElement>(null);
   const menuPopoverRef = useRef<HTMLDivElement>(null);
 
   // Trigger refs for each dropdown menu so popovers position directly below their button
@@ -229,6 +247,15 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
     left: number;
     maxHeight: number;
   }>({ top: 84, left: 12, maxHeight: 480 });
+
+  // Desktop-only drawing tools ribbon overflow & scroll controls state
+  const [isDesktopPointer, setIsDesktopPointer] = useState<boolean>(() =>
+    detectDesktopFinePointer()
+  );
+  const [hasRibbonOverflow, setHasRibbonOverflow] = useState<boolean>(false);
+  const [canScrollRibbonLeft, setCanScrollRibbonLeft] = useState<boolean>(false);
+  const [canScrollRibbonRight, setCanScrollRibbonRight] = useState<boolean>(false);
+  const hasRibbonOverflowRef = useRef<boolean>(false);
 
   // Remember the last selected shape even after the editor returns to Select post-drawing
   const [lastSelectedShape, setLastSelectedShape] =
@@ -382,6 +409,8 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
       const target = e.target as Node | null;
       if (!target) return;
       if (menuPopoverRef.current?.contains(target)) return;
+      if (ribbonScrollLeftBtnRef.current?.contains(target)) return;
+      if (ribbonScrollRightBtnRef.current?.contains(target)) return;
       const triggerEl = getTriggerElement(openMenu);
       if (triggerEl?.contains(target)) return;
       setOpenMenu(null);
@@ -405,6 +434,199 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
       window.removeEventListener('keydown', handleKeyDownCapture, true);
     };
   }, [openMenu, getTriggerElement]);
+
+  // Track pointer capability changes (e.g. connecting a mouse or switching viewport emulation)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const fineQuery = window.matchMedia('(hover: hover) and (pointer: fine)');
+    const coarseQuery = window.matchMedia('(pointer: coarse)');
+    const syncPointerCapability = () => {
+      setIsDesktopPointer(detectDesktopFinePointer());
+    };
+    syncPointerCapability();
+    fineQuery.addEventListener?.('change', syncPointerCapability);
+    coarseQuery.addEventListener?.('change', syncPointerCapability);
+    return () => {
+      fineQuery.removeEventListener?.('change', syncPointerCapability);
+      coarseQuery.removeEventListener?.('change', syncPointerCapability);
+    };
+  }, []);
+
+  const updateRibbonScrollState = useCallback(() => {
+    const el = toolStripRef.current;
+    const wrapperEl = ribbonWrapperRef.current;
+    if (!el || !wrapperEl || !isDesktopPointer) {
+      hasRibbonOverflowRef.current = false;
+      setHasRibbonOverflow(false);
+      setCanScrollRibbonLeft(false);
+      setCanScrollRibbonRight(false);
+      return;
+    }
+
+    // When desktop scroll controls are visible, horizontal padding on toolStripRef is px-1.5 (12px)
+    // instead of sm:px-3 (24px), so naturalScrollWidth = el.scrollWidth + 12.
+    const naturalScrollWidth = hasRibbonOverflowRef.current
+      ? el.scrollWidth + 12
+      : el.scrollWidth;
+    const availableWrapperWidth = wrapperEl.clientWidth;
+
+    const nextOverflow = hasRibbonOverflowRef.current
+      ? naturalScrollWidth > availableWrapperWidth - 2
+      : naturalScrollWidth > availableWrapperWidth + 1;
+
+    hasRibbonOverflowRef.current = nextOverflow;
+    const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+    const nextCanLeft = nextOverflow && el.scrollLeft > 1;
+    const nextCanRight = nextOverflow && el.scrollLeft < maxScrollLeft - 1;
+
+    setHasRibbonOverflow((prev) => (prev !== nextOverflow ? nextOverflow : prev));
+    setCanScrollRibbonLeft((prev) => (prev !== nextCanLeft ? nextCanLeft : prev));
+    setCanScrollRibbonRight((prev) => (prev !== nextCanRight ? nextCanRight : prev));
+  }, [isDesktopPointer]);
+
+  // Synchronize desktop ribbon overflow & scroll arrow states on layout, scroll, window resize, and browser zoom
+  useLayoutEffect(() => {
+    updateRibbonScrollState();
+  }, [
+    updateRibbonScrollState,
+    hasRibbonOverflow,
+    lastSelectedShape,
+    precisionMode,
+  ]);
+
+  useEffect(() => {
+    if (!isDesktopPointer) return;
+    const stripEl = toolStripRef.current;
+    const wrapperEl = ribbonWrapperRef.current;
+
+    const handleScrollOrResize = () => {
+      updateRibbonScrollState();
+    };
+
+    stripEl?.addEventListener('scroll', handleScrollOrResize, { passive: true });
+    window.addEventListener('resize', handleScrollOrResize);
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', handleScrollOrResize);
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        updateRibbonScrollState();
+      });
+      if (stripEl) observer.observe(stripEl);
+      if (wrapperEl && wrapperEl !== stripEl) observer.observe(wrapperEl);
+    }
+
+    return () => {
+      stripEl?.removeEventListener('scroll', handleScrollOrResize);
+      window.removeEventListener('resize', handleScrollOrResize);
+      vv?.removeEventListener('resize', handleScrollOrResize);
+      observer?.disconnect();
+    };
+  }, [isDesktopPointer, updateRibbonScrollState]);
+
+  // Desktop-only: allow vertical mouse-wheel movement over the ribbon to scroll tools horizontally
+  // while preserving native horizontal trackpad scrolling and Ctrl + Wheel browser zoom.
+  useEffect(() => {
+    if (!isDesktopPointer) return;
+    const stripEl = toolStripRef.current;
+    if (!stripEl) return;
+
+    const handleRibbonWheel = (e: WheelEvent) => {
+      // Never intercept Ctrl + Wheel or Meta + Wheel browser zoom
+      if (e.ctrlKey || e.metaKey) {
+        return;
+      }
+
+      const maxScrollLeft = stripEl.scrollWidth - stripEl.clientWidth;
+      if (maxScrollLeft <= 1) {
+        return;
+      }
+
+      // Preserve native horizontal trackpad two-finger scrolling when horizontal delta dominates
+      if (Math.abs(e.deltaX) >= Math.abs(e.deltaY) && e.deltaX !== 0) {
+        return;
+      }
+
+      if (e.deltaY !== 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        const modeMultiplier =
+          e.deltaMode === 1
+            ? 20
+            : e.deltaMode === 2
+            ? Math.max(120, stripEl.clientWidth * 0.8)
+            : 1;
+        stripEl.scrollLeft += e.deltaY * modeMultiplier;
+        updateRibbonScrollState();
+      }
+    };
+
+    stripEl.addEventListener('wheel', handleRibbonWheel, { passive: false });
+    return () => {
+      stripEl.removeEventListener('wheel', handleRibbonWheel);
+    };
+  }, [isDesktopPointer, updateRibbonScrollState]);
+
+  // Desktop-only: ensure the currently selected tool remains visible inside the ribbon when selected or resized
+  const ensureActiveToolVisibleOnDesktop = useCallback(
+    (tool: ToolType, behavior: ScrollBehavior = 'smooth') => {
+      if (!isDesktopPointer) return;
+      const stripEl = toolStripRef.current;
+      if (!stripEl) return;
+      const maxScroll = stripEl.scrollWidth - stripEl.clientWidth;
+      if (maxScroll <= 1) return;
+
+      const targetAttr =
+        tool === 'rectangle' ||
+        tool === 'square' ||
+        tool === 'ellipse' ||
+        tool === 'circle' ||
+        tool === 'triangle'
+          ? 'shape'
+          : tool;
+
+      const toolEl = stripEl.querySelector<HTMLElement>(
+        `[data-tool-id="${targetAttr}"]`
+      );
+      if (!toolEl) return;
+
+      const stripRect = stripEl.getBoundingClientRect();
+      const toolRect = toolEl.getBoundingClientRect();
+      const edgePad = 18;
+
+      if (toolRect.left < stripRect.left + edgePad) {
+        const delta = toolRect.left - (stripRect.left + edgePad);
+        stripEl.scrollBy({ left: delta, behavior });
+      } else if (toolRect.right > stripRect.right - edgePad) {
+        const delta = toolRect.right - (stripRect.right - edgePad);
+        stripEl.scrollBy({ left: delta, behavior });
+      }
+    },
+    [isDesktopPointer]
+  );
+
+  useEffect(() => {
+    if (!isDesktopPointer) return;
+    ensureActiveToolVisibleOnDesktop(activeTool, 'smooth');
+  }, [activeTool, isDesktopPointer, ensureActiveToolVisibleOnDesktop]);
+
+  const scrollRibbonBy = useCallback(
+    (direction: 'left' | 'right') => {
+      const stripEl = toolStripRef.current;
+      if (!stripEl) return;
+      const step = Math.max(160, Math.round(stripEl.clientWidth * 0.55));
+      stripEl.scrollBy({
+        left: direction === 'left' ? -step : step,
+        behavior: 'smooth',
+      });
+    },
+    []
+  );
+
+  const showDesktopScrollControls = isDesktopPointer && hasRibbonOverflow;
 
   const isShapeTool =
     activeTool === 'rectangle' ||
@@ -1494,370 +1716,461 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
       {/* Second Row: Horizontally Scrollable Editing & Drawing Tools Strip */}
       <div
-        ref={toolStripRef}
-        className="h-10 w-full max-w-full px-1.5 sm:px-3 bg-slate-50/90 flex items-center gap-1 touch-scroll-x no-scrollbar"
+        ref={ribbonWrapperRef}
+        className="relative h-10 w-full max-w-full bg-slate-50/90 flex items-center"
       >
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            onSelectTool('select');
-          }}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            activeTool === 'select'
-              ? 'bg-slate-900 text-white shadow-sm'
-              : 'text-slate-700 hover:bg-white border border-transparent hover:border-slate-200'
-          }`}
-        >
-          <MousePointer className="w-3.5 h-3.5" />
-          <span>Select</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            onSelectTool('pan');
-          }}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            activeTool === 'pan'
-              ? 'bg-slate-900 text-white shadow-sm'
-              : 'text-slate-700 hover:bg-white border border-transparent hover:border-slate-200'
-          }`}
-        >
-          <Hand className="w-3.5 h-3.5" />
-          <span>Slide / Pan</span>
-        </button>
-
-        <div className="w-px h-4 bg-slate-300 mx-0.5 shrink-0" />
-
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            imageInputRef.current?.click();
-          }}
-          className="px-2.5 py-1 text-xs font-medium text-slate-700 hover:text-slate-900 hover:bg-white rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-        >
-          <ImagePlus className="w-3.5 h-3.5 text-blue-600" />
-          <span>Image</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            onSelectTool('text');
-          }}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            activeTool === 'text'
-              ? 'bg-blue-600 text-white shadow-sm'
-              : 'text-slate-700 hover:bg-white'
-          }`}
-        >
-          <Type className="w-3.5 h-3.5" />
-          <span>Text</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            onSelectTool('line');
-          }}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            activeTool === 'line'
-              ? 'bg-blue-600 text-white shadow-sm'
-              : 'text-slate-700 hover:bg-white'
-          }`}
-        >
-          <Minus className="w-3.5 h-3.5" />
-          <span>Line</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            onSelectTool('arrow');
-          }}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            activeTool === 'arrow'
-              ? 'bg-blue-600 text-white shadow-sm'
-              : 'text-slate-700 hover:bg-white'
-          }`}
-        >
-          <MoveUpRight className="w-3.5 h-3.5" />
-          <span>Arrow</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            onSelectTool('dimension');
-          }}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            activeTool === 'dimension'
-              ? 'bg-blue-600 text-white shadow-sm'
-              : 'text-slate-700 hover:bg-white'
-          }`}
-        >
-          <Ruler className="w-3.5 h-3.5" />
-          <span>Dimension</span>
-        </button>
-
-        {/* Freehand Pen Button + Settings Popover Trigger (Opens settings & activates Pen on first click) */}
-        <div ref={penTriggerRef} className="flex items-center shrink-0">
+        {/* Desktop-only Left Scroll Control (never rendered on mobile/touch devices) */}
+        {showDesktopScrollControls && (
           <button
+            ref={ribbonScrollLeftBtnRef}
             type="button"
-            onClick={() => {
-              if (activeTool !== 'pen') {
-                onSelectTool('pen');
-                openSpecificMenu('pen');
-              } else {
-                toggleMenu('pen');
-              }
-            }}
-            className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTool === 'pen'
-                ? 'bg-blue-600 text-white shadow-sm'
-                : 'text-slate-700 hover:bg-white'
+            disabled={!canScrollRibbonLeft}
+            onClick={() => scrollRibbonBy('left')}
+            className={`h-full w-7 flex items-center justify-center border-r border-slate-200/90 shrink-0 transition-colors z-10 ${
+              canScrollRibbonLeft
+                ? 'bg-slate-100/95 hover:bg-white text-slate-700 hover:text-slate-950 cursor-pointer'
+                : 'bg-slate-50/60 text-slate-300 cursor-default'
             }`}
-            title="Freehand Pen — Activates Pen and opens colour & thickness settings"
+            title={
+              canScrollRibbonLeft
+                ? 'Scroll tools left (or use mouse wheel over ribbon)'
+                : 'At start of tools ribbon'
+            }
+            aria-label="Scroll drawing tools left"
           >
-            <PenTool className="w-3.5 h-3.5" />
-            <span>Pen</span>
-            <span
-              className="w-2.5 h-2.5 rounded-full border border-black/25 shrink-0"
-              style={{ backgroundColor: penColor }}
-            />
+            <ChevronLeft className="w-4 h-4" />
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (activeTool !== 'pen') {
-                onSelectTool('pen');
-                openSpecificMenu('pen');
-              } else {
-                toggleMenu('pen');
-              }
-            }}
-            className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
-              activeTool === 'pen'
-                ? 'bg-blue-700 text-white border-blue-500'
-                : 'text-slate-600 hover:bg-white border-slate-200'
-            }`}
-            title="Pen colour & stroke thickness"
-            aria-label="Pen colour and stroke thickness"
-          >
-            <ChevronDown className="w-3.5 h-3.5" />
-          </button>
-        </div>
+        )}
 
-        {/* Freehand Highlighter Button + Settings Popover Trigger (Opens settings & activates Highlighter on first click) */}
-        <div
-          ref={freehandHighlighterTriggerRef}
-          className="flex items-center shrink-0"
-        >
-          <button
-            type="button"
-            onClick={() => {
-              if (activeTool !== 'freehand-highlighter') {
-                onSelectTool('freehand-highlighter');
-                openSpecificMenu('freehand-highlighter');
-              } else {
-                toggleMenu('freehand-highlighter');
-              }
-            }}
-            className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTool === 'freehand-highlighter'
-                ? 'bg-blue-600 text-white shadow-sm'
-                : 'text-slate-700 hover:bg-white'
-            }`}
-            title="Freehand Highlighter — Activates Highlighter and opens colour & thickness settings"
-          >
-            <Highlighter className="w-3.5 h-3.5" />
-            <span>Highlighter</span>
-            <span
-              className="w-2.5 h-2.5 rounded-sm border border-black/20 shrink-0"
-              style={{ backgroundColor: freehandHighlighterColor }}
-            />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (activeTool !== 'freehand-highlighter') {
-                onSelectTool('freehand-highlighter');
-                openSpecificMenu('freehand-highlighter');
-              } else {
-                toggleMenu('freehand-highlighter');
-              }
-            }}
-            className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
-              activeTool === 'freehand-highlighter'
-                ? 'bg-blue-700 text-white border-blue-500'
-                : 'text-slate-600 hover:bg-white border-slate-200'
-            }`}
-            title="Highlighter colour & stroke thickness"
-            aria-label="Highlighter colour and stroke thickness"
-          >
-            <ChevronDown className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        {/* Basic Eraser Button (Erases only Freehand Pen & Highlighter strokes) */}
-        <button
-          type="button"
-          onClick={() => {
-            closeAllMenus();
-            onSelectTool('eraser');
-          }}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            activeTool === 'eraser'
-              ? 'bg-blue-600 text-white shadow-sm'
-              : 'text-slate-700 hover:bg-white'
-          }`}
-          title="Eraser — Click or drag across freehand Pen or Highlighter strokes to remove them"
-        >
-          <Eraser className="w-3.5 h-3.5" />
-          <span>Eraser</span>
-        </button>
-
-        {/* Shapes Button + Menu Trigger (Remembers last selected shape & opens menu on first click) */}
-        <div ref={shapeTriggerRef} className="flex items-center shrink-0">
-          <button
-            type="button"
-            onClick={() => {
-              if (!isShapeTool) {
-                onSelectTool(lastSelectedShape);
-              }
-              toggleMenu('shape');
-            }}
-            className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              isShapeTool
-                ? 'bg-blue-600 text-white shadow-sm'
-                : 'text-slate-700 hover:bg-white'
-            }`}
-            title={`Shapes (${currentShapeMeta.buttonLabel}) — Click to choose Rectangle, Square, Ellipse, Circle or Triangle`}
-          >
-            <CurrentShapeIcon className="w-3.5 h-3.5" />
-            <span>{currentShapeMeta.buttonLabel}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (!isShapeTool) {
-                onSelectTool(lastSelectedShape);
-              }
-              toggleMenu('shape');
-            }}
-            className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
-              isShapeTool
-                ? 'bg-blue-700 text-white border-blue-500'
-                : 'text-slate-600 hover:bg-white border-slate-200'
-            }`}
-            title="Choose shape type"
-            aria-label="Choose shape type"
-          >
-            <ChevronDown className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        {/* Rectangular Area Highlight Button + Swatch Trigger (Opens colour presets & activates on first click) */}
-        <div ref={highlightTriggerRef} className="flex items-center shrink-0">
-          <button
-            type="button"
-            onClick={() => {
-              if (activeTool !== 'highlight') {
-                onSelectTool('highlight');
-                openSpecificMenu('highlight');
-              } else {
-                toggleMenu('highlight');
-              }
-            }}
-            className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTool === 'highlight'
-                ? 'bg-blue-600 text-white shadow-sm'
-                : 'text-slate-700 hover:bg-white'
-            }`}
-            title="Area Highlight — Draw a translucent rectangular highlight box"
-          >
-            <Square className="w-3.5 h-3.5" />
-            <span>Area Highlight</span>
-            <span
-              className="w-2.5 h-2.5 rounded-sm border border-black/20"
-              style={{ backgroundColor: activeHighlightColor }}
-            />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (activeTool !== 'highlight') {
-                onSelectTool('highlight');
-                openSpecificMenu('highlight');
-              } else {
-                toggleMenu('highlight');
-              }
-            }}
-            className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
-              activeTool === 'highlight'
-                ? 'bg-blue-700 text-white border-blue-500'
-                : 'text-slate-600 hover:bg-white border-slate-200'
-            }`}
-            title="Area Highlight colour presets"
-            aria-label="Area Highlight colour presets"
-          >
-            <ChevronDown className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        <div className="w-px h-4 bg-slate-300 mx-0.5 shrink-0" />
-
-        {/* Quick Snap to Objects Toggle Button */}
-        <button
-          type="button"
-          onClick={onToggleSnapToObjects}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-            snapToObjects
-              ? 'bg-blue-50 text-blue-700 border border-blue-200/80 shadow-sm'
-              : 'text-slate-600 hover:bg-white border border-transparent'
-          }`}
-          title="Toggle magnetic snapping to other objects' edges and centres"
-        >
-          <Magnet
-            className={`w-3.5 h-3.5 ${
-              snapToObjects ? 'text-blue-600' : 'text-slate-400'
-            }`}
+        {/* Desktop-only subtle left edge fade when tools are scrolled to the left */}
+        {showDesktopScrollControls && canScrollRibbonLeft && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute left-7 inset-y-0 w-6 bg-gradient-to-r from-slate-100/95 via-slate-50/70 to-transparent z-10"
           />
-          <span>Snap Objects</span>
-        </button>
+        )}
 
-        {/* Guides & Snap Button */}
-        <button
-          ref={guidesTriggerRef}
-          type="button"
-          onClick={() => toggleMenu('guides')}
-          className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 border ${
-            precisionMode
-              ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-sm'
-              : 'text-slate-700 hover:bg-white border-transparent'
-          }`}
-          title={
-            precisionMode
-              ? `Guides & Snap — Precision Mode ON (1 mm guides & ${angleSnapIncrementDeg}° angle snap)`
-              : `Guides & Snap (Angle snap: ${angleSnapIncrementDeg}°)`
-          }
+        <div
+          ref={toolStripRef}
+          className={`h-10 ${
+            showDesktopScrollControls
+              ? 'flex-1 min-w-0 px-1.5'
+              : 'w-full max-w-full px-1.5 sm:px-3'
+          } bg-slate-50/90 flex items-center gap-1 touch-scroll-x no-scrollbar`}
         >
-          <Grid className="w-3.5 h-3.5 text-cyan-600" />
-          <span>Guides & Snap</span>
-          {precisionMode && (
-            <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-mono text-[10px] font-semibold leading-none">
-              Precision
-            </span>
-          )}
-          <ChevronDown className="w-3 h-3 text-slate-400" />
-        </button>
+          <button
+            type="button"
+            data-tool-id="select"
+            onClick={() => {
+              closeAllMenus();
+              onSelectTool('select');
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'select'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'text-slate-700 hover:bg-white border border-transparent hover:border-slate-200'
+            }`}
+          >
+            <MousePointer className="w-3.5 h-3.5" />
+            <span>Select</span>
+          </button>
+
+          <button
+            type="button"
+            data-tool-id="pan"
+            onClick={() => {
+              closeAllMenus();
+              onSelectTool('pan');
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'pan'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'text-slate-700 hover:bg-white border border-transparent hover:border-slate-200'
+            }`}
+          >
+            <Hand className="w-3.5 h-3.5" />
+            <span>Slide / Pan</span>
+          </button>
+
+          <div className="w-px h-4 bg-slate-300 mx-0.5 shrink-0" />
+
+          <button
+            type="button"
+            onClick={() => {
+              closeAllMenus();
+              imageInputRef.current?.click();
+            }}
+            className="px-2.5 py-1 text-xs font-medium text-slate-700 hover:text-slate-900 hover:bg-white rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          >
+            <ImagePlus className="w-3.5 h-3.5 text-blue-600" />
+            <span>Image</span>
+          </button>
+
+          <button
+            type="button"
+            data-tool-id="text"
+            onClick={() => {
+              closeAllMenus();
+              onSelectTool('text');
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'text'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-700 hover:bg-white'
+            }`}
+          >
+            <Type className="w-3.5 h-3.5" />
+            <span>Text</span>
+          </button>
+
+          <button
+            type="button"
+            data-tool-id="line"
+            onClick={() => {
+              closeAllMenus();
+              onSelectTool('line');
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'line'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-700 hover:bg-white'
+            }`}
+          >
+            <Minus className="w-3.5 h-3.5" />
+            <span>Line</span>
+          </button>
+
+          <button
+            type="button"
+            data-tool-id="arrow"
+            onClick={() => {
+              closeAllMenus();
+              onSelectTool('arrow');
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'arrow'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-700 hover:bg-white'
+            }`}
+          >
+            <MoveUpRight className="w-3.5 h-3.5" />
+            <span>Arrow</span>
+          </button>
+
+          <button
+            type="button"
+            data-tool-id="dimension"
+            onClick={() => {
+              closeAllMenus();
+              onSelectTool('dimension');
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'dimension'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-700 hover:bg-white'
+            }`}
+          >
+            <Ruler className="w-3.5 h-3.5" />
+            <span>Dimension</span>
+          </button>
+
+          {/* Freehand Pen Button + Settings Popover Trigger (Opens settings & activates Pen on first click) */}
+          <div
+            ref={penTriggerRef}
+            data-tool-id="pen"
+            className="flex items-center shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTool !== 'pen') {
+                  onSelectTool('pen');
+                  openSpecificMenu('pen');
+                } else {
+                  toggleMenu('pen');
+                }
+              }}
+              className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                activeTool === 'pen'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-700 hover:bg-white'
+              }`}
+              title="Freehand Pen — Activates Pen and opens colour & thickness settings"
+            >
+              <PenTool className="w-3.5 h-3.5" />
+              <span>Pen</span>
+              <span
+                className="w-2.5 h-2.5 rounded-full border border-black/25 shrink-0"
+                style={{ backgroundColor: penColor }}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTool !== 'pen') {
+                  onSelectTool('pen');
+                  openSpecificMenu('pen');
+                } else {
+                  toggleMenu('pen');
+                }
+              }}
+              className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
+                activeTool === 'pen'
+                  ? 'bg-blue-700 text-white border-blue-500'
+                  : 'text-slate-600 hover:bg-white border-slate-200'
+              }`}
+              title="Pen colour & stroke thickness"
+              aria-label="Pen colour and stroke thickness"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Freehand Highlighter Button + Settings Popover Trigger (Opens settings & activates Highlighter on first click) */}
+          <div
+            ref={freehandHighlighterTriggerRef}
+            data-tool-id="freehand-highlighter"
+            className="flex items-center shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTool !== 'freehand-highlighter') {
+                  onSelectTool('freehand-highlighter');
+                  openSpecificMenu('freehand-highlighter');
+                } else {
+                  toggleMenu('freehand-highlighter');
+                }
+              }}
+              className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                activeTool === 'freehand-highlighter'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-700 hover:bg-white'
+              }`}
+              title="Freehand Highlighter — Activates Highlighter and opens colour & thickness settings"
+            >
+              <Highlighter className="w-3.5 h-3.5" />
+              <span>Highlighter</span>
+              <span
+                className="w-2.5 h-2.5 rounded-sm border border-black/20 shrink-0"
+                style={{ backgroundColor: freehandHighlighterColor }}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTool !== 'freehand-highlighter') {
+                  onSelectTool('freehand-highlighter');
+                  openSpecificMenu('freehand-highlighter');
+                } else {
+                  toggleMenu('freehand-highlighter');
+                }
+              }}
+              className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
+                activeTool === 'freehand-highlighter'
+                  ? 'bg-blue-700 text-white border-blue-500'
+                  : 'text-slate-600 hover:bg-white border-slate-200'
+              }`}
+              title="Highlighter colour & stroke thickness"
+              aria-label="Highlighter colour and stroke thickness"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Basic Eraser Button (Erases only Freehand Pen & Highlighter strokes) */}
+          <button
+            type="button"
+            data-tool-id="eraser"
+            onClick={() => {
+              closeAllMenus();
+              onSelectTool('eraser');
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              activeTool === 'eraser'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-700 hover:bg-white'
+            }`}
+            title="Eraser — Click or drag across freehand Pen or Highlighter strokes to remove them"
+          >
+            <Eraser className="w-3.5 h-3.5" />
+            <span>Eraser</span>
+          </button>
+
+          {/* Shapes Button + Menu Trigger (Remembers last selected shape & opens menu on first click) */}
+          <div
+            ref={shapeTriggerRef}
+            data-tool-id="shape"
+            className="flex items-center shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (!isShapeTool) {
+                  onSelectTool(lastSelectedShape);
+                }
+                toggleMenu('shape');
+              }}
+              className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                isShapeTool
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-700 hover:bg-white'
+              }`}
+              title={`Shapes (${currentShapeMeta.buttonLabel}) — Click to choose Rectangle, Square, Ellipse, Circle or Triangle`}
+            >
+              <CurrentShapeIcon className="w-3.5 h-3.5" />
+              <span>{currentShapeMeta.buttonLabel}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!isShapeTool) {
+                  onSelectTool(lastSelectedShape);
+                }
+                toggleMenu('shape');
+              }}
+              className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
+                isShapeTool
+                  ? 'bg-blue-700 text-white border-blue-500'
+                  : 'text-slate-600 hover:bg-white border-slate-200'
+              }`}
+              title="Choose shape type"
+              aria-label="Choose shape type"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Rectangular Area Highlight Button + Swatch Trigger (Opens colour presets & activates on first click) */}
+          <div
+            ref={highlightTriggerRef}
+            data-tool-id="highlight"
+            className="flex items-center shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTool !== 'highlight') {
+                  onSelectTool('highlight');
+                  openSpecificMenu('highlight');
+                } else {
+                  toggleMenu('highlight');
+                }
+              }}
+              className={`px-2.5 py-1 text-xs font-medium rounded-l flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                activeTool === 'highlight'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-700 hover:bg-white'
+              }`}
+              title="Area Highlight — Draw a translucent rectangular highlight box"
+            >
+              <Square className="w-3.5 h-3.5" />
+              <span>Area Highlight</span>
+              <span
+                className="w-2.5 h-2.5 rounded-sm border border-black/20"
+                style={{ backgroundColor: activeHighlightColor }}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (activeTool !== 'highlight') {
+                  onSelectTool('highlight');
+                  openSpecificMenu('highlight');
+                } else {
+                  toggleMenu('highlight');
+                }
+              }}
+              className={`px-1 py-1 text-xs rounded-r border-l transition-colors ${
+                activeTool === 'highlight'
+                  ? 'bg-blue-700 text-white border-blue-500'
+                  : 'text-slate-600 hover:bg-white border-slate-200'
+              }`}
+              title="Area Highlight colour presets"
+              aria-label="Area Highlight colour presets"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="w-px h-4 bg-slate-300 mx-0.5 shrink-0" />
+
+          {/* Quick Snap to Objects Toggle Button */}
+          <button
+            type="button"
+            onClick={onToggleSnapToObjects}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              snapToObjects
+                ? 'bg-blue-50 text-blue-700 border border-blue-200/80 shadow-sm'
+                : 'text-slate-600 hover:bg-white border border-transparent'
+            }`}
+            title="Toggle magnetic snapping to other objects' edges and centres"
+          >
+            <Magnet
+              className={`w-3.5 h-3.5 ${
+                snapToObjects ? 'text-blue-600' : 'text-slate-400'
+              }`}
+            />
+            <span>Snap Objects</span>
+          </button>
+
+          {/* Guides & Snap Button */}
+          <button
+            ref={guidesTriggerRef}
+            type="button"
+            onClick={() => toggleMenu('guides')}
+            className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 border ${
+              precisionMode
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-sm'
+                : 'text-slate-700 hover:bg-white border-transparent'
+            }`}
+            title={
+              precisionMode
+                ? `Guides & Snap — Precision Mode ON (1 mm guides & ${angleSnapIncrementDeg}° angle snap)`
+                : `Guides & Snap (Angle snap: ${angleSnapIncrementDeg}°)`
+            }
+          >
+            <Grid className="w-3.5 h-3.5 text-cyan-600" />
+            <span>Guides & Snap</span>
+            {precisionMode && (
+              <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-mono text-[10px] font-semibold leading-none">
+                Precision
+              </span>
+            )}
+            <ChevronDown className="w-3 h-3 text-slate-400" />
+          </button>
+        </div>
+
+        {/* Desktop-only subtle right edge fade when tools extend beyond the right edge */}
+        {showDesktopScrollControls && canScrollRibbonRight && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute right-7 inset-y-0 w-6 bg-gradient-to-l from-slate-100/95 via-slate-50/70 to-transparent z-10"
+          />
+        )}
+
+        {/* Desktop-only Right Scroll Control (never rendered on mobile/touch devices) */}
+        {showDesktopScrollControls && (
+          <button
+            ref={ribbonScrollRightBtnRef}
+            type="button"
+            disabled={!canScrollRibbonRight}
+            onClick={() => scrollRibbonBy('right')}
+            className={`h-full w-7 flex items-center justify-center border-l border-slate-200/90 shrink-0 transition-colors z-10 ${
+              canScrollRibbonRight
+                ? 'bg-slate-100/95 hover:bg-white text-slate-700 hover:text-slate-950 cursor-pointer'
+                : 'bg-slate-50/60 text-slate-300 cursor-default'
+            }`}
+            title={
+              canScrollRibbonRight
+                ? 'Scroll tools right (or use mouse wheel over ribbon)'
+                : 'At end of tools ribbon'
+            }
+            aria-label="Scroll drawing tools right"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       {/* Render Anchored Dropdown Popovers via Portal so they are never clipped by toolbar overflow */}

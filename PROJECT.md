@@ -475,13 +475,30 @@
     - When a stored `FileSystemFileHandle` throws `NotFoundError`, notifies the user that the original file no longer exists; automatically removes the invalid recent entry if no cached copy exists, or retains the entry and offers **"Open Local Copy"** in `ReopenRecentModal` if a cached snapshot is available.
     - Updated the Recent list UI in `TopToolbar.tsx` to clearly distinguish **`Open directly`** (accessible original file), **`Local copy`** (cached version available), and **`Locate file`** (neither available).
 
+### Milestone 31 — Responsive Desktop Drawing Tools Ribbon
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Responsive Drawing Tools Ribbon"*
+- **Engineering Changes**:
+  - **1. Desktop-Only Pointer Detection & Zero Mobile Impact (`src/components/TopToolbar.tsx`)**:
+    - Added `detectDesktopFinePointer()` checking `(hover: hover) and (pointer: fine)` and excluding `(pointer: coarse)` so responsive scroll controls, edge fades, and wheel listeners apply **strictly** to desktop/laptop viewports using a mouse or trackpad.
+    - Mobile/touch layouts (`Android` and `iPhone`) retain their exact single-row `.touch-scroll-x no-scrollbar` horizontal finger-swipe ribbon without any added buttons, fade overlays, or layout changes.
+  - **2. Overflow Detection, Docked Scroll Arrows & Edge Fades (`src/components/TopToolbar.tsx`)**:
+    - Added hysteresis-free overflow measurement (`updateRibbonScrollState`) connected to `ResizeObserver`, `window` resize, `window.visualViewport` resize, and ribbon `scroll` events so the ribbon adapts automatically when the browser window is resized or browser zoom changes.
+    - When `isDesktopPointer && hasRibbonOverflow` is true, renders compact left/right scroll arrow buttons (`ChevronLeft` / `ChevronRight`) docked cleanly at the outer ends of the ribbon (never covering the first `Select` or last `Guides & Snap` tool buttons), disabling each arrow when its respective scroll end is reached (`canScrollRibbonLeft` / `canScrollRibbonRight`).
+    - Renders subtle left/right gradient edge fades (`bg-gradient-to-r` / `bg-gradient-to-l`) on desktop whenever additional tools remain scrolled out of view in that direction.
+  - **3. Mouse-Wheel Horizontal Scrolling, Active Tool Visibility & Dropdown Sync (`src/components/TopToolbar.tsx`)**:
+    - Added a desktop-only native `{ passive: false }` wheel listener on `toolStripRef` so vertical mouse-wheel scrolling over the drawing-tools ribbon scrolls tools horizontally, while preserving native two-axis horizontal trackpad scrolling and never intercepting `Ctrl + Wheel` (or `Meta + Wheel`) browser zoom.
+    - Added `data-tool-id` attributes and `ensureActiveToolVisibleOnDesktop` so selecting a tool on desktop automatically scrolls it into view if partially clipped.
+    - Updated `handleOutsidePointerDown` so clicking the left/right ribbon scroll arrows does not close an open tool dropdown (Pen, Highlighter, Shapes, Precision, or Guides & Snap), while `updatePopoverPositions` keeps anchored React portal menus synchronized with their trigger buttons during scroll.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference
 
 | Shortcut | Action |
 | :--- | :--- |
-| `Wheel` | Pan canvas vertically (and horizontally on 2-axis trackpads) |
+| `Wheel` | Pan canvas vertically (and horizontally on 2-axis trackpads); scroll drawing-tools ribbon horizontally when hovering the desktop ribbon |
 | `Alt + Wheel` | Pan canvas horizontally |
 | `Shift + Wheel` | Zoom canvas in / out centred around the mouse pointer |
 | `Ctrl + Wheel` | Native browser tab / page zoom (not intercepted by PageLay) |
@@ -515,6 +532,7 @@
 | Zoom-Invariant Canvas | `src/components/EditorCanvas.tsx` | Verified | 1:1 `mm` layout scaled via GPU compositor |
 | Mobile Touch & Pinch Zoom | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1-finger pan, 2-finger pinch zoom & focal pan, multi-touch stroke cancel |
 | Desktop Mouse Wheel Navigation | `src/components/EditorCanvas.tsx` | Verified | `Wheel` vertical pan, `Alt+Wheel` horizontal pan, `Shift+Wheel` pointer-centred zoom, `Ctrl+Wheel` native browser zoom |
+| Responsive Drawing Tools Ribbon | `src/components/TopToolbar.tsx` | Verified | Desktop-only overflow detection, docked left/right scroll arrows, edge fades, vertical mouse-wheel horizontal scroll, mobile touch-scroll preserved |
 | Viewport & Overflow Lock | `index.html`, `src/index.css`, `src/App.tsx` | Verified | `100dvh` lock, `overscroll-none`, isolated drawer positioning |
 | Ruler & Guideline Isolation | `src/components/Rulers.tsx`, `src/components/EditorCanvas.tsx` | Verified | Target & coordinate checks prevent accidental page pan |
 | Magnetic Snap to Objects | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx` | Verified | Snaps to edges & centres of other objects + TopToolbar toggle |
@@ -524,7 +542,6 @@
 | Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx` | Verified | `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
 | Undo/Redo & Keyboard Shortcuts Suite | `src/App.tsx`, `src/components/EditorCanvas.tsx` | Verified | Pre-drag history snapshots, Undo (`Ctrl+Z`), Redo (`Ctrl+Y`/`Ctrl+Shift+Z`), Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
 | `.lay` Archive Save / Save As / Open & Page Import | `src/services/layFileService.ts`, `src/components/PagesSidebar.tsx`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation, sidebar `.lay` page import |
-| Open Recent Documents (Max 10) | `src/services/recentFilesService.ts`, `src/components/TopToolbar.tsx`, `src/components/Modals.tsx`, `src/App.tsx` | Verified | Metadata in `localStorage` + `FileSystemFileHandle` in separate IndexedDB (`pagelay_recent_files_v1`), direct reopen on desktop, guided picker fallback on mobile |
+| Open Recent Documents (Max 10) | `src/services/recentFilesService.ts`, `src/components/TopToolbar.tsx`, `src/components/Modals.tsx`, `src/App.tsx` | Verified | 3-tier quick reopen: 1. `FileSystemFileHandle`, 2. Cached `.lay` Blob in `pagelay_recent_files_v1` / `recent_blobs`, 3. `ReopenRecentModal` picker |
 | Local Session Recovery & Undo/Redo Persistence | `src/services/recoveryDraftService.ts`, `src/App.tsx`, `src/components/Modals.tsx` | Verified | Quiet same-tab reload recovery (`sessionStorage` + IndexedDB), full `historyPast`/`historyFuture` & deleted image asset retention, "Continue editing your document?" modal |
 | Vector PDF & High-DPI Export | `src/services/pdfExportService.ts`, `src/services/imageExportService.ts` | Verified | `pdf-lib` vector output + 72/150/300 DPI PNG/JPG |
-
