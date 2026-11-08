@@ -50,6 +50,7 @@ import { TopToolbar } from './components/TopToolbar';
 import { PagesSidebar } from './components/PagesSidebar';
 import { EditorCanvas } from './components/EditorCanvas';
 import { PropertiesPanel } from './components/PropertiesPanel';
+import { HelpPanel } from './components/HelpPanel';
 import { StatusBar } from './components/StatusBar';
 import { RULER_THICKNESS_PX } from './components/Rulers';
 import {
@@ -168,6 +169,7 @@ export default function App() {
   const [isPropertiesOpen, setIsPropertiesOpen] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
   );
+  const [isHelpOpen, setIsHelpOpen] = useState<boolean>(false);
 
   // Viewport Zoom & Pan (only affects visual display, never canonical mm document geometry)
   const [zoom, setZoom] = useState<number>(0.18);
@@ -1623,6 +1625,20 @@ export default function App() {
         return;
       }
 
+      // When Help is open as a full-screen view on mobile/tablet (< 1024px), prevent canvas shortcuts
+      if (isHelpOpen && typeof window !== 'undefined' && window.innerWidth < 1024) {
+        const targetEl = e.target as HTMLElement | null;
+        const isInputTarget =
+          targetEl?.tagName === 'INPUT' ||
+          targetEl?.tagName === 'TEXTAREA' ||
+          targetEl?.tagName === 'SELECT';
+        if (e.key === 'Escape' && !isInputTarget) {
+          e.preventDefault();
+          setIsHelpOpen(false);
+        }
+        return;
+      }
+
       const keyLower = e.key.toLowerCase();
       const isSaveKey = keyLower === 's' || e.code === 'KeyS';
 
@@ -1853,6 +1869,7 @@ export default function App() {
     isUnsavedModalOpen,
     reopenRecentModalState.isOpen,
     exportModalState.isOpen,
+    isHelpOpen,
     pushHistory,
     handleUndo,
     handleRedo,
@@ -2686,17 +2703,34 @@ export default function App() {
         onOpenExportModal={(tab) => setExportModalState({ isOpen: true, tab })}
         isPagesOpen={isPagesOpen}
         isPropertiesOpen={isPropertiesOpen}
+        isHelpOpen={isHelpOpen}
         onTogglePages={() => {
           setIsPagesOpen((prev) => {
             const next = !prev;
-            if (next && window.innerWidth < 1024) setIsPropertiesOpen(false);
+            if (next && window.innerWidth < 1024) {
+              setIsPropertiesOpen(false);
+              setIsHelpOpen(false);
+            }
             return next;
           });
         }}
         onToggleProperties={() => {
           setIsPropertiesOpen((prev) => {
             const next = !prev;
-            if (next && window.innerWidth < 1024) setIsPagesOpen(false);
+            if (next) {
+              setIsHelpOpen(false);
+              if (window.innerWidth < 1024) setIsPagesOpen(false);
+            }
+            return next;
+          });
+        }}
+        onToggleHelp={() => {
+          setIsHelpOpen((prev) => {
+            const next = !prev;
+            if (next) {
+              setIsPropertiesOpen(false);
+              if (window.innerWidth < 1024) setIsPagesOpen(false);
+            }
             return next;
           });
         }}
@@ -3041,6 +3075,9 @@ export default function App() {
             />
           </div>
         )}
+
+        {/* RIGHT SIDEBAR — HELP & HOW TO (Docked on lg+ replacing Properties, full-screen in-app view on mobile/tablet) */}
+        {isHelpOpen && <HelpPanel onClose={() => setIsHelpOpen(false)} />}
       </div>
 
       {/* BOTTOM STATUS BAR */}

@@ -54,11 +54,13 @@ All operations run locally in your browser with zero external cloud dependencies
 - **Vector PDF Export (`pdf-lib`)**: Generates print-ready PDFs at exact physical millimetre dimensions (`1 mm = 72 / 25.4 pt`), embedding original JPEG/PNG image streams and rendering text, arrows, dimensions, freehand strokes, and shapes as crisp vector graphics.
 - **High-Resolution PNG / JPG Export**: Rasterizes the current page or all pages at **72 DPI** (screen), **150 DPI** (draft print), or **300 DPI** (high-resolution print) with automatic memory-safety scaling on large formats.
 
-### 6. Desktop & Mobile Touch Ergonomics
+### 6. Desktop & Mobile Touch Ergonomics + Integrated Help Manual
 - **Pointer & Touch Gestures**:
   - **1-Finger Drag / Pan Tool / Spacebar + Drag**: Smoothly pan and slide the workspace.
   - **2-Finger Pinch-to-Zoom & Pan**: Simultaneous focal-point pinch zooming and two-finger panning on phones and tablets.
+  - **Desktop Mouse-Wheel Navigation & Responsive Ribbon**: `Wheel` pans vertically, `Alt + Wheel` pans horizontally, `Shift + Wheel` zooms around the cursor, and `Ctrl + Wheel` preserves native browser zoom. On narrower desktop windows, the drawing-tools ribbon shows left/right scroll arrows and supports vertical mouse-wheel horizontal scrolling.
   - **Ruler & Sidebar Touch Isolation**: Pointer and touch handlers verify event targets so dragging guidelines from rulers or scrolling sidebars never triggers unintended document panning.
+- **Integrated Help & How To Manual**: Searchable, offline 10-section British English manual accessible via the **Help** button between **Properties** and **Export** (opening as a docked `~352 px` right-hand panel replacing Properties on desktop, or a full-screen in-app view on mobile).
 
 ---
 
@@ -101,18 +103,22 @@ npm run lint
     ├── main.tsx                    # React DOM entry point
     ├── index.css                   # Tailwind CSS v4 + mobile touch-action & viewport rules
     ├── components/
-    │   ├── TopToolbar.tsx          # File menu, tool selector, guides menu, export triggers
+    │   ├── TopToolbar.tsx          # File menu, recent menu, responsive tool ribbon, Help & Export triggers
     │   ├── PagesSidebar.tsx        # Multi-page thumbnail navigator, page actions & .lay page import
     │   ├── EditorCanvas.tsx        # Zoom-invariant mm canvas, pointer/touch gestures, object manipulation
     │   ├── Rulers.tsx              # Dynamic horizontal & vertical millimetre rulers
     │   ├── PropertiesPanel.tsx     # Context-sensitive mm inspector, Align menu, Group/Ungroup controls
+    │   ├── HelpPanel.tsx           # Searchable Help & How To manual (docked right panel on desktop, full-screen on mobile)
     │   ├── StatusBar.tsx           # Live cursor mm coordinates, paper specs, save/recovery status, zoom controls
-    │   └── Modals.tsx              # New Document, Export, Save As, Unsaved Changes & Recovery Draft modals
+    │   └── Modals.tsx              # New Document, Export, Save As, Unsaved Changes, Reopen Recent & Recovery modals
+    ├── content/
+    │   └── helpContent.ts          # Read-only 10-section British English Help & How To articles and offline search
     ├── model/
     │   ├── documentTypes.ts        # Authoritative TypeScript interfaces (canonical mm coordinates)
     │   └── documentFactory.ts      # Document/page factories, deep cloning, page import & A0 sample generator
     ├── services/
     │   ├── layFileService.ts       # .lay ZIP archive packager & loader (JSZip)
+    │   ├── recentFilesService.ts   # Open Recent (max 10) metadata, FileSystemFileHandle & cached .lay Blob store
     │   ├── recoveryDraftService.ts # IndexedDB local session recovery & incremental binary asset store
     │   ├── pdfExportService.ts     # Vector PDF generator at exact physical mm scale (pdf-lib)
     │   └── imageExportService.ts   # High-DPI offscreen HTML5 Canvas rasterizer (PNG/JPG)

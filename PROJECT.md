@@ -492,6 +492,20 @@
     - Added `data-tool-id` attributes and `ensureActiveToolVisibleOnDesktop` so selecting a tool on desktop automatically scrolls it into view if partially clipped.
     - Updated `handleOutsidePointerDown` so clicking the left/right ribbon scroll arrows does not close an open tool dropdown (Pen, Highlighter, Shapes, Precision, or Guides & Snap), while `updatePopoverPositions` keeps anchored React portal menus synchronized with their trigger buttons during scroll.
 
+### Milestone 32 — Integrated Help & How To Manual (Version 1)
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Help & How To (Version 1)"*
+- **Engineering Changes**:
+  - **1. Structured Local Help Content & Offline Search (`src/content/helpContent.ts`)**:
+    - Created a read-only local manual written in British English and organised into 10 practical sections (`Getting Started`, `Pages and Layout`, `Drawing Tools`, `Precision and Snapping`, `Images and Objects`, `Opening and Saving`, `Recovery and Undo`, `Exporting`, `Mobile and Keyboard Controls`, and `Troubleshooting`).
+    - Included `searchHelpArticles(rawQuery)` for instant offline search across section titles, article titles, summaries, keywords, step-by-step instructions, bullet points, callout warnings, and shortcuts without any external API calls.
+    - Prepared an optional `illustrations?: HelpArticleIllustration[]` interface for future screenshots/diagrams without introducing invented screenshots or placeholder assets in Version 1.
+  - **2. Responsive Help Panel & Toolbar Button (`src/components/HelpPanel.tsx`, `src/components/TopToolbar.tsx`, `src/App.tsx`)**:
+    - Added the **Help** button (`CircleHelp` icon) in `TopToolbar.tsx` immediately between **Properties** and **Export**, showing the icon + `Help` label on desktop (`lg+`) and the compact question-mark icon on smaller laptop screens and mobile (`< 1024px`).
+    - On desktop (`lg+`), `HelpPanel` opens as a docked right-side scrollable panel (`lg:w-[352px]`), mutually exclusive with `PropertiesPanel` so only one right-hand panel is open at a time.
+    - On phone and tablet (`max-lg`), `HelpPanel` opens as a full-screen responsive in-app view with touch scrolling (`data-allow-touch-scroll="true"`, `touch-scroll-y`), search input keyboard isolation, and clear `Back` / `Close` actions that return directly to the editor while preserving document state, selection, zoom, pan, history, and unsaved changes.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference
@@ -544,4 +558,5 @@
 | `.lay` Archive Save / Save As / Open & Page Import | `src/services/layFileService.ts`, `src/components/PagesSidebar.tsx`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation, sidebar `.lay` page import |
 | Open Recent Documents (Max 10) | `src/services/recentFilesService.ts`, `src/components/TopToolbar.tsx`, `src/components/Modals.tsx`, `src/App.tsx` | Verified | 3-tier quick reopen: 1. `FileSystemFileHandle`, 2. Cached `.lay` Blob in `pagelay_recent_files_v1` / `recent_blobs`, 3. `ReopenRecentModal` picker |
 | Local Session Recovery & Undo/Redo Persistence | `src/services/recoveryDraftService.ts`, `src/App.tsx`, `src/components/Modals.tsx` | Verified | Quiet same-tab reload recovery (`sessionStorage` + IndexedDB), full `historyPast`/`historyFuture` & deleted image asset retention, "Continue editing your document?" modal |
+| Integrated Help & How To Manual | `src/content/helpContent.ts`, `src/components/HelpPanel.tsx`, `src/components/TopToolbar.tsx`, `src/App.tsx` | Verified | 10-section searchable British English manual, docked right panel on desktop (`~352px`) replacing Properties, full-screen in-app view on mobile |
 | Vector PDF & High-DPI Export | `src/services/pdfExportService.ts`, `src/services/imageExportService.ts` | Verified | `pdf-lib` vector output + 72/150/300 DPI PNG/JPG |

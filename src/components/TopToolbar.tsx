@@ -50,6 +50,7 @@ import {
   Trash2,
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
 } from 'lucide-react';
 import {
   FREEHAND_HIGHLIGHTER_PRESETS,
@@ -112,8 +113,10 @@ interface TopToolbarProps {
   onOpenExportModal: (defaultTab: 'pdf' | 'image') => void;
   isPagesOpen: boolean;
   isPropertiesOpen: boolean;
+  isHelpOpen: boolean;
   onTogglePages: () => void;
   onToggleProperties: () => void;
+  onToggleHelp: () => void;
   hasSelectedObject: boolean;
 }
 
@@ -216,8 +219,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   onOpenExportModal,
   isPagesOpen,
   isPropertiesOpen,
+  isHelpOpen,
   onTogglePages,
   onToggleProperties,
+  onToggleHelp,
   hasSelectedObject,
 }) => {
   const layInputRef = useRef<HTMLInputElement>(null);
@@ -1697,6 +1702,25 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           >
             <SlidersHorizontal className="w-3.5 h-3.5" />
             <span className="hidden sm:inline text-[11px]">Properties</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              closeAllMenus();
+              onToggleHelp();
+            }}
+            className={`p-1.5 lg:px-2 lg:py-1 rounded border text-xs flex items-center gap-1 transition-colors ${
+              isHelpOpen
+                ? 'bg-slate-900 text-white border-slate-900'
+                : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+            }`}
+            title="Toggle Help & How To Manual"
+            aria-label="Help and How To"
+            aria-expanded={isHelpOpen}
+          >
+            <CircleHelp className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline text-[11px]">Help</span>
           </button>
 
           <button
