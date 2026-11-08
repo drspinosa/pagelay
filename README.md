@@ -89,6 +89,21 @@ npm run lint
 
 ---
 
+### Windows PowerShell / VS Code
+
+If PowerShell blocks npm scripts, use `npm.cmd` without changing Windows security settings.
+
+```powershell
+npm.cmd install
+npm.cmd run dev
+npm.cmd run lint
+npm.cmd run build
+```
+
+Open http://localhost:3000 to test PageLay locally.
+
+Production files are generated in the `dist/` folder.
+
 ## Project Structure
 
 ```text
