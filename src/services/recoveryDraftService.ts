@@ -70,6 +70,8 @@ interface StoredRecoveryDraftMeta {
   savedAtMs: number;
   savedAtIso: string;
   tabSessionId: string;
+  isDirty?: boolean;
+  hasActiveSessionDoc?: boolean;
   activePageIndex: number;
   historyDocumentId: string;
   historyPast: HistorySnapshot[];
@@ -101,6 +103,7 @@ interface TabSessionMarker {
   documentId: string;
   documentName: string;
   isDirty: boolean;
+  hasActiveSessionDoc: boolean;
   lastUpdatedAtMs: number;
 }
 
@@ -120,6 +123,7 @@ export interface RecoveryDraftSummary {
   savedAtIso: string;
   revision: number;
   tabSessionId: string;
+  isDirty: boolean;
   isSameActiveTabSession: boolean;
 }
 
@@ -128,6 +132,7 @@ export interface RestoredRecoveryDraft {
   activePageIndex: number;
   historyPast: HistorySnapshot[];
   historyFuture: HistorySnapshot[];
+  isDirty: boolean;
   summary: RecoveryDraftSummary;
 }
 
@@ -138,6 +143,10 @@ export interface RecoveryStorageDiagnostics {
   limitationReason: string | null;
 }
 
+export interface SaveCheckpointOptions {
+  isDirty?: boolean;
+}
+
 export interface SaveCheckpointResult {
   status: 'saved' | 'skipped-stale' | 'quota-exceeded' | 'unavailable' | 'error';
   savedAtIso?: string;
@@ -145,15 +154,9 @@ export interface SaveCheckpointResult {
   errorMessage?: string;
 }
 
-/**
- * Capture the pre-existing `sessionStorage` marker on module initialization (before React effects run)
- * so we can reliably detect whether this exact browser tab reloaded an active unsaved editing session.
- */
-function readInitialTabSessionMarker(): TabSessionMarker | null {
+function parseSessionMarker(raw: string | null): TabSessionMarker | null {
+  if (!raw) return null;
   try {
-    if (typeof window === 'undefined' || !window.sessionStorage) return null;
-    const raw = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<TabSessionMarker>;
     if (
       parsed &&
@@ -170,6 +173,7 @@ function readInitialTabSessionMarker(): TabSessionMarker | null {
             ? parsed.documentName
             : 'Untitled Document',
         isDirty: Boolean(parsed.isDirty),
+        hasActiveSessionDoc: parsed.hasActiveSessionDoc ?? true,
         lastUpdatedAtMs:
           typeof parsed.lastUpdatedAtMs === 'number'
             ? parsed.lastUpdatedAtMs
@@ -182,23 +186,69 @@ function readInitialTabSessionMarker(): TabSessionMarker | null {
   }
 }
 
-const initialTabMarkerOnLoad: TabSessionMarker | null = readInitialTabSessionMarker();
+/**
+ * Capture the pre-existing `sessionStorage` and `localStorage` markers on module initialization
+ * (before React effects run) so we can reliably detect whether this exact browser tab or
+ * recreated mobile preview `<iframe>` reloaded an active session (whether dirty or a freshly
+ * opened `.lay` document).
+ */
+function readInitialSessionMarkers(): {
+  sessionMarker: TabSessionMarker | null;
+  localMarker: TabSessionMarker | null;
+} {
+  let sessionMarker: TabSessionMarker | null = null;
+  let localMarker: TabSessionMarker | null = null;
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      sessionMarker = parseSessionMarker(
+        window.sessionStorage.getItem(SESSION_STORAGE_KEY)
+      );
+    }
+  } catch {
+    sessionMarker = null;
+  }
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localMarker = parseSessionMarker(
+        window.localStorage.getItem(SESSION_STORAGE_KEY)
+      );
+    }
+  } catch {
+    localMarker = null;
+  }
+  return { sessionMarker, localMarker };
+}
+
+const {
+  sessionMarker: initialTabMarkerOnLoad,
+  localMarker: initialLocalMarkerOnLoad,
+} = readInitialSessionMarkers();
 
 const currentTabSessionId: string =
   initialTabMarkerOnLoad?.tabSessionId ||
+  initialLocalMarkerOnLoad?.tabSessionId ||
   `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 function writeTabSessionMarker(marker: TabSessionMarker): void {
+  const serialized = JSON.stringify(marker);
   try {
-    if (typeof window === 'undefined' || !window.sessionStorage) return;
-    window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(marker));
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      window.sessionStorage.setItem(SESSION_STORAGE_KEY, serialized);
+    }
   } catch {
     // Ignore sessionStorage errors in restricted WebViews
+  }
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, serialized);
+    }
+  } catch {
+    // Ignore localStorage errors in restricted WebViews
   }
 }
 
 /**
- * Records in `window.sessionStorage` that this browser tab is actively editing an unsaved document.
+ * Records in `sessionStorage` and `localStorage` that this browser tab is actively editing an unsaved document.
  */
 export function markTabSessionDirty(documentId: string, documentName: string): void {
   writeTabSessionMarker({
@@ -206,20 +256,26 @@ export function markTabSessionDirty(documentId: string, documentName: string): v
     documentId,
     documentName,
     isDirty: true,
+    hasActiveSessionDoc: true,
     lastUpdatedAtMs: Date.now(),
   });
 }
 
 /**
- * Records in `window.sessionStorage` that the active document in this tab is clean (saved, discarded,
- * or newly created/opened), preventing stale quiet auto-recovery on subsequent reloads.
+ * Records in `sessionStorage` and `localStorage` that the active document in this tab is clean
+ * (e.g., freshly opened `.lay`, saved `.lay`, or explicitly discarded when `hasActiveSessionDoc = false`).
  */
-export function markTabSessionClean(documentId: string, documentName: string): void {
+export function markTabSessionClean(
+  documentId: string,
+  documentName: string,
+  hasActiveSessionDoc = true
+): void {
   writeTabSessionMarker({
     tabSessionId: currentTabSessionId,
     documentId,
     documentName,
     isDirty: false,
+    hasActiveSessionDoc,
     lastUpdatedAtMs: Date.now(),
   });
 }
@@ -401,17 +457,38 @@ export async function probeRecoveryStorage(): Promise<RecoveryStorageDiagnostics
 
 /**
  * Determines whether the persisted IndexedDB checkpoint belongs to the exact same active browser tab
- * editing session that just reloaded (e.g., mobile screen lock/unlock reload or in-tab refresh).
+ * or embedded preview session that just reloaded (e.g., mobile screen lock/unlock reload, or Android
+ * preview iframe remounting 2–3 seconds after returning from the native file picker).
  */
 function isSameActiveSessionReload(meta: StoredRecoveryDraftMeta): boolean {
-  if (!initialTabMarkerOnLoad) return false;
-  if (!initialTabMarkerOnLoad.isDirty) return false;
-  if (!meta.tabSessionId || !meta.document?.id) return false;
+  if (!meta.document?.id) return false;
+  if (meta.hasActiveSessionDoc === false) return false;
 
-  return (
+  // 1. Exact tab sessionStorage match (survives in-tab refresh / mobile tab reload)
+  if (
+    initialTabMarkerOnLoad &&
+    initialTabMarkerOnLoad.hasActiveSessionDoc !== false &&
+    meta.tabSessionId &&
     initialTabMarkerOnLoad.tabSessionId === meta.tabSessionId &&
     initialTabMarkerOnLoad.documentId === meta.document.id
-  );
+  ) {
+    return true;
+  }
+
+  // 2. Embedded preview iframe remount fallback (e.g., Google AI Studio on Android recreating the
+  // preview <iframe> DOM element 2–3 seconds after returning from Android's external file picker Activity).
+  const nowMs = Date.now();
+  const recentWindowMs = isEmbeddedIframe() ? 10 * 60 * 1000 : 60 * 1000;
+  if (
+    initialLocalMarkerOnLoad &&
+    initialLocalMarkerOnLoad.hasActiveSessionDoc !== false &&
+    initialLocalMarkerOnLoad.documentId === meta.document.id &&
+    Math.abs(nowMs - initialLocalMarkerOnLoad.lastUpdatedAtMs) <= recentWindowMs
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function sanitizeHistoryStack(
@@ -486,12 +563,13 @@ function buildSummaryFromMeta(meta: StoredRecoveryDraftMeta): RecoveryDraftSumma
     savedAtIso: meta.savedAtIso,
     revision: meta.revision,
     tabSessionId: meta.tabSessionId || '',
+    isDirty: Boolean(meta.isDirty ?? true),
     isSameActiveTabSession: isSameActiveSessionReload(meta),
   };
 }
 
 /**
- * Checks on startup whether a valid, complete local recovery draft exists in IndexedDB.
+ * Checks on startup whether a valid, complete local recovery draft or active session document exists in IndexedDB.
  * Verifies that all referenced binary image assets exist in `draft_assets` without loading
  * multi-megabyte buffers until restoration runs.
  */
@@ -517,13 +595,27 @@ export async function peekRecoveryDraftSummary(): Promise<RecoveryDraftSummary |
         return null;
       }
 
-      // If this exact tab explicitly marked a newer clean/saved state after the draft timestamp, ignore stale draft
+      if (meta.hasActiveSessionDoc === false) {
+        return null;
+      }
+
+      // If this session explicitly discarded the draft after the checkpoint timestamp, ignore it
+      const activeMarker = initialTabMarkerOnLoad ?? initialLocalMarkerOnLoad;
       if (
-        initialTabMarkerOnLoad &&
-        !initialTabMarkerOnLoad.isDirty &&
-        initialTabMarkerOnLoad.tabSessionId === meta.tabSessionId &&
-        initialTabMarkerOnLoad.lastUpdatedAtMs > meta.savedAtMs
+        activeMarker &&
+        activeMarker.hasActiveSessionDoc === false &&
+        activeMarker.lastUpdatedAtMs >= meta.savedAtMs
       ) {
+        return null;
+      }
+
+      const sameActiveSession = isSameActiveSessionReload(meta);
+      const isDirtyCheckpoint = Boolean(meta.isDirty ?? true);
+
+      // A clean (already saved or freshly opened) document checkpoint is ONLY restored automatically
+      // when the exact same active session reloads/remounts (e.g., Android file-picker return or lock/unlock).
+      // In a brand-new tab or later browser session, clean documents do not prompt for recovery.
+      if (!isDirtyCheckpoint && !sameActiveSession) {
         return null;
       }
 
@@ -703,13 +795,19 @@ export async function restoreRecoveryDraft(): Promise<RestoredRecoveryDraft | nu
         latestRequestedRevision = meta.revision;
       }
 
-      markTabSessionDirty(docId, docName);
+      const restoredIsDirty = Boolean(meta.isDirty ?? true);
+      if (restoredIsDirty) {
+        markTabSessionDirty(docId, docName);
+      } else {
+        markTabSessionClean(docId, docName, true);
+      }
 
       return {
         doc: restoredDoc,
         activePageIndex: clampedPageIndex,
         historyPast: restoredHistoryPast,
         historyFuture: restoredHistoryFuture,
+        isDirty: restoredIsDirty,
         summary: buildSummaryFromMeta({
           ...meta,
           tabSessionId: currentTabSessionId,
@@ -745,6 +843,9 @@ function collectAllReferencedAssetIdsAcrossHistory(
  * - Writes only new or changed binary image assets (`Uint8Array`) to `draft_assets`.
  * - Preserves all image assets referenced by current pages OR by any snapshot in `historyPast` / `historyFuture`
  *   so Undoing a deleted image or Redoing an imported page after recovery retains full-resolution image data.
+ * - Also supports persisting a clean active session document (`options.isDirty = false`) when opening or saving a
+ *   `.lay` document so that if the mobile browser or preview host reloads 2–3 seconds after file-picker return,
+ *   the opened/saved document is seamlessly restored instead of reverting to a blank A0 layout.
  * - Never persists temporary `blob:` object URLs.
  * - Uses monotonic revision numbering so an older checkpoint never overwrites a newer checkpoint.
  */
@@ -752,14 +853,20 @@ export async function saveRecoveryCheckpoint(
   doc: PageLayDocument,
   activePageIndex: number,
   historyPast: HistorySnapshot[] = [],
-  historyFuture: HistorySnapshot[] = []
+  historyFuture: HistorySnapshot[] = [],
+  options?: SaveCheckpointOptions
 ): Promise<SaveCheckpointResult> {
   const requestRevision = ++latestRequestedRevision;
   const savedAtMs = Date.now();
   const savedAtIso = new Date(savedAtMs).toISOString();
+  const isDirtyCheckpoint = options?.isDirty ?? true;
 
-  // Synchronously update sessionStorage so this tab's active document & dirty state are recorded immediately
-  markTabSessionDirty(doc.id, doc.name);
+  // Synchronously update sessionStorage & localStorage so this session's active document is recorded immediately
+  if (isDirtyCheckpoint) {
+    markTabSessionDirty(doc.id, doc.name);
+  } else {
+    markTabSessionClean(doc.id, doc.name, true);
+  }
 
   // Deep-clone pages and bounded history stacks synchronously at request time
   const pagesClone: PageData[] = JSON.parse(JSON.stringify(doc.pages));
@@ -799,6 +906,8 @@ export async function saveRecoveryCheckpoint(
     savedAtMs,
     savedAtIso,
     tabSessionId: currentTabSessionId,
+    isDirty: isDirtyCheckpoint,
+    hasActiveSessionDoc: true,
     activePageIndex,
     historyDocumentId: doc.id,
     historyPast: pastSlice,
@@ -967,7 +1076,7 @@ export async function saveRecoveryCheckpoint(
 
 /**
  * Deliberately removes the active recovery draft and all stored recovery image binaries from IndexedDB,
- * and marks the current tab session as clean so old discarded work never reappears on the next launch.
+ * and marks the current tab session as having no active session draft so old discarded work never reappears.
  */
 export async function clearRecoveryDraft(
   cleanDocumentId?: string,
@@ -977,7 +1086,11 @@ export async function clearRecoveryDraft(
   persistedAssetSignatures.clear();
 
   if (cleanDocumentId) {
-    markTabSessionClean(cleanDocumentId, cleanDocumentName || 'Untitled Document');
+    markTabSessionClean(
+      cleanDocumentId,
+      cleanDocumentName || 'Untitled Document',
+      false
+    );
   } else {
     try {
       if (typeof window !== 'undefined' && window.sessionStorage) {
@@ -985,6 +1098,13 @@ export async function clearRecoveryDraft(
       }
     } catch {
       // Ignore sessionStorage errors
+    }
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore localStorage errors
     }
   }
 

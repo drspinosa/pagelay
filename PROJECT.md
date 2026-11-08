@@ -398,6 +398,31 @@
       - Pinned footer (`shrink-0`) keeping **Cancel** / **Keep Current Document** and **Save .lay** / **Confirm Saved & Continue** accessible at all times, including in short landscape viewports and when the Android/iPhone on-screen keyboard is open (`items-start sm:items-center` + `max-sm:max-h-[min(56dvh,calc(var(--vv-height,100dvh)-16px))]` while editing the filename on mobile).
       - Avoids automatically focusing the filename input on mobile/coarse-pointer devices when the modal first opens so the keyboard only appears when the user taps the field, while preserving automatic focus and filename selection on desktop.
 
+### Milestone 27 — Fix Mobile Open: Document Disappears After 2–3 Seconds
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Fix Mobile Open: Document Disappears After 2–3 Seconds"*
+- **Confirmed Root Causes**:
+  1. **Wiping IndexedDB on Open + Preview Remount 2–3 Seconds After Android File Picker Return (`src/App.tsx`, `src/services/recoveryDraftService.ts`)**:
+     - When opening a `.lay` file via `<input type="file">` (`openLayFileAndApply`) or native file picker (`handleTriggerOpenNativePicker`), PageLay applied `loadedDoc` to React state and then immediately called `markClean()` + `resolveAndClearRecoveryDraft()`. That **deleted the IndexedDB checkpoint (`draft_meta` and `draft_assets`)** and marked `isDirty: false`. Because the newly opened document was clean (`isDirty === false`), the debounced recovery effect refused to write `loadedDoc` to IndexedDB.
+     - On Android inside Google AI Studio's preview (and mobile browsers returning from the external `DocumentsUI` file-picker Activity), the host container or browser sometimes reloads or recreates the preview `<iframe>` ~2–3 seconds after returning from the file picker. When `App.tsx` remounted, it initialized `createNewDocument('Untitled A0 Layout', 'A0', 'landscape')`, checked IndexedDB, found nothing (because `openLayFileAndApply` had just cleared IndexedDB and `isSameActiveSessionReload` previously rejected `!isDirty`), and remained on the blank A0 document.
+  2. **Startup Recovery `useEffect` Dependency Re-run & `!isDirtyRef.current` Race (`src/App.tsx`)**:
+     - `fitPageToWorkspace` previously depended on `[doc.widthMm, doc.heightMm]`, which caused `applyRestoredRecoveryDraft` and the startup `useEffect` (`[applyRestoredRecoveryDraft]`) to re-run its cleanup (`cancelled = true`) whenever a document with non-A0 dimensions was opened, leaving `isRecoveryReady` stuck at `false`.
+     - Additionally, the startup recovery `useEffect` only checked `if (existingSummary && !isDirtyRef.current)` before restoring a draft. Because a freshly opened `.lay` document is legitimately clean (`isDirtyRef.current === false`), a delayed startup recovery read completing after a file open could see `!isDirtyRef.current === true` and overwrite the newly opened document.
+- **Engineering Changes**:
+  - **1. Active Clean Session Persistence on Open, Save, Sample & New Document (`src/services/recoveryDraftService.ts`, `src/App.tsx`)**:
+    - Extended `saveRecoveryCheckpoint` to accept `{ isDirty?: boolean }` and added `persistCleanActiveDocumentCheckpoint` in `src/App.tsx`.
+    - Whenever a `.lay` document is opened (`openLayFileAndApply` or `handleTriggerOpenNativePicker`), saved (`handleSaveDocument`, `handleSaveAsDocument`, `SaveAsModal`), or replaced (`loadSampleDocumentImmediate`, `create-blank`), PageLay immediately persists the active document and its binary image assets to IndexedDB with `isDirty: false` and `hasActiveSessionDoc: true`, and mirrors the active session marker to both `window.sessionStorage` and `window.localStorage` (`pagelay_active_session_mirror_v1`).
+    - If the mobile browser or embedded preview `<iframe>` remounts/reloads 2–3 seconds after returning from the Android/iPhone file picker (or after locking/unlocking the phone), `peekRecoveryDraftSummary` and `isSameActiveSessionReload` recognize the active session document and `applyRestoredRecoveryDraft` seamlessly restores it with `isDirty: false`—while ensuring clean documents never trigger a recovery modal in a new tab or later session.
+  - **2. Monotonic Document Session Generation Guard (`documentSessionGenRef` in `src/App.tsx`)**:
+    - Added `documentSessionGenRef` and `hasUserReplacedOrEditedDocRef` in `src/App.tsx`. Every file open, new document creation, sample load, or user edit increments `documentSessionGenRef.current` and sets `hasUserReplacedOrEditedDocRef.current = true`.
+    - Both the startup recovery `useEffect` and `applyRestoredRecoveryDraft(expectedSessionGen)` verify `documentSessionGenRef.current === expectedSessionGen && !hasUserReplacedOrEditedDocRef.current` before and after awaiting IndexedDB operations so a slow startup recovery check can never overwrite a newly opened clean `.lay` document.
+    - Stabilized `fitPageToWorkspace` (`[]` dependencies, reading `docRef.current` defaults) so opening a document with different dimensions never cancels startup recovery initialization.
+  - **3. Synchronous Native Picker Capability Check (`canUseNativeOpenFilePickerSync` in `src/services/layFileService.ts`, `src/App.tsx`)**:
+    - Added `canUseNativeOpenFilePickerSync()` so mobile browsers and cross-origin preview iframes trigger `hiddenLayInputRef.current?.click()` synchronously inside the user's tap gesture without awaiting a rejected async promise.
+  - **4. Concise Lifecycle Diagnostics (`logDocumentLifecycle` in `src/App.tsx`)**:
+    - Added structured `[PageLay Lifecycle]` console diagnostics tracing initial blank state creation, startup recovery checks, `.lay` file open start/apply, clean session checkpoint persistence, and recovery draft clearing.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference

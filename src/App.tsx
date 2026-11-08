@@ -37,6 +37,7 @@ import {
   translatePageObjectMm,
 } from './utils/units';
 import {
+  canUseNativeOpenFilePickerSync,
   importImageFileToAsset,
   LayFileSystemHandle,
   loadDocumentFromLayFile,
@@ -101,11 +102,36 @@ function createSnapshot(doc: PageLayDocument): HistorySnapshot {
   };
 }
 
+function countDocumentObjects(targetDoc: PageLayDocument): number {
+  let count = 0;
+  for (const page of targetDoc.pages || []) {
+    count += Array.isArray(page.objects) ? page.objects.length : 0;
+  }
+  return count;
+}
+
+function logDocumentLifecycle(
+  stage: string,
+  targetDoc: PageLayDocument,
+  extra?: Record<string, unknown>
+): void {
+  console.info('[PageLay Lifecycle]', {
+    stage,
+    docId: targetDoc.id,
+    docName: targetDoc.name,
+    pages: targetDoc.pages?.length ?? 0,
+    objects: countDocumentObjects(targetDoc),
+    ...extra,
+  });
+}
+
 export default function App() {
   // Default document: A0 landscape, 1189 mm wide × 841 mm high
-  const [doc, setDoc] = useState<PageLayDocument>(() =>
-    createNewDocument('Untitled A0 Layout', 'A0', 'landscape')
-  );
+  const [doc, setDoc] = useState<PageLayDocument>(() => {
+    const initialDoc = createNewDocument('Untitled A0 Layout', 'A0', 'landscape');
+    logDocumentLifecycle('initial-blank-state-created', initialDoc);
+    return initialDoc;
+  });
   const [activePageIndex, setActivePageIndex] = useState<number>(0);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
@@ -158,6 +184,11 @@ export default function App() {
   historyFutureRef.current = historyFuture;
   const isDirtyRef = useRef<boolean>(isDirty);
   isDirtyRef.current = isDirty;
+
+  // Monotonic document session generation guard: increments whenever the user opens a file,
+  // creates a document, loads Sample A0, or edits the document so stale startup recovery never overwrites it.
+  const documentSessionGenRef = useRef<number>(0);
+  const hasUserReplacedOrEditedDocRef = useRef<boolean>(false);
 
   // Clipboard for Copy / Paste
   const [clipboardObject, setClipboardObject] = useState<PageObject | null>(null);
@@ -226,21 +257,24 @@ export default function App() {
 
   /**
    * Computes a zoom level and pan offset that fits the physical document page inside the central workspace.
+   * Uses `docRef.current` for defaults so its callback identity remains stable across document dimension changes.
    */
   const fitPageToWorkspace = useCallback(
     (
-      targetWidthMm = doc.widthMm,
-      targetHeightMm = doc.heightMm,
+      targetWidthMm?: number,
+      targetHeightMm?: number,
       mode: 'page' | 'width' = 'page'
     ) => {
       const el = workspaceRef.current;
       if (!el) return;
+      const wMm = targetWidthMm ?? docRef.current.widthMm;
+      const hMm = targetHeightMm ?? docRef.current.heightMm;
       const paddingPx = el.clientWidth < 640 ? 24 : 56;
       const availW = Math.max(120, el.clientWidth - RULER_THICKNESS_PX - paddingPx);
       const availH = Math.max(120, el.clientHeight - RULER_THICKNESS_PX - paddingPx);
 
-      const pagePxWAt100 = targetWidthMm * CSS_PX_PER_MM_AT_100;
-      const pagePxHAt100 = targetHeightMm * CSS_PX_PER_MM_AT_100;
+      const pagePxWAt100 = wMm * CSS_PX_PER_MM_AT_100;
+      const pagePxHAt100 = hMm * CSS_PX_PER_MM_AT_100;
 
       const scaleX = availW / pagePxWAt100;
       const scaleY = availH / pagePxHAt100;
@@ -258,7 +292,7 @@ export default function App() {
       setPanX(Math.max(12, Math.round((el.clientWidth - RULER_THICKNESS_PX - renderedW) / 2)));
       setPanY(Math.max(12, Math.round((el.clientHeight - RULER_THICKNESS_PX - renderedH) / 2)));
     },
-    [doc.widthMm, doc.heightMm]
+    []
   );
 
   // Fit page nicely on initial mount, document dimension changes, and mobile viewport/orientation resizes
@@ -287,17 +321,22 @@ export default function App() {
   }, [fitPageToWorkspace, doc.widthMm, doc.heightMm]);
 
   const markDirty = useCallback(() => {
+    hasUserReplacedOrEditedDocRef.current = true;
     isDirtyRef.current = true;
     newModalAuthorisedRef.current = false;
     setIsDirty(true);
     markTabSessionDirty(docRef.current.id, docRef.current.name);
   }, []);
 
-  const markClean = useCallback(() => {
+  const markClean = useCallback((hasActiveSessionDoc = true) => {
     isDirtyRef.current = false;
     newModalAuthorisedRef.current = false;
     setIsDirty(false);
-    markTabSessionClean(docRef.current.id, docRef.current.name);
+    markTabSessionClean(
+      docRef.current.id,
+      docRef.current.name,
+      hasActiveSessionDoc
+    );
   }, []);
 
   const cancelPendingRecoveryCheckpoint = useCallback(() => {
@@ -307,6 +346,37 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * Persists the active clean document (e.g., immediately after opening a `.lay` file, saving a `.lay` file,
+   * creating a new document, or loading Sample A0) into IndexedDB with `isDirty: false`.
+   * This guarantees that if the mobile browser or preview host reloads 2–3 seconds after returning from
+   * the native file picker, the opened/saved document is seamlessly restored instead of a blank A0 layout.
+   */
+  const persistCleanActiveDocumentCheckpoint = useCallback(
+    async (
+      targetDoc: PageLayDocument,
+      targetPageIndex = 0,
+      past: HistorySnapshot[] = [],
+      future: HistorySnapshot[] = []
+    ) => {
+      cancelPendingRecoveryCheckpoint();
+      recoveryReadyRef.current = true;
+      setIsRecoveryReady(true);
+      setLastRecoveryCheckpointAt(null);
+      const res = await saveRecoveryCheckpoint(
+        targetDoc,
+        targetPageIndex,
+        past,
+        future,
+        { isDirty: false }
+      );
+      logDocumentLifecycle('clean-session-checkpoint-persisted', targetDoc, {
+        status: res.status,
+      });
+    },
+    [cancelPendingRecoveryCheckpoint]
+  );
+
   const flushRecoveryCheckpointNow = useCallback(async () => {
     cancelPendingRecoveryCheckpoint();
     if (!recoveryReadyRef.current || !isDirtyRef.current) return;
@@ -314,7 +384,8 @@ export default function App() {
       docRef.current,
       activePageIndexRef.current,
       historyPastRef.current,
-      historyFutureRef.current
+      historyFutureRef.current,
+      { isDirty: true }
     );
     if (res.status === 'saved' && res.savedAtIso) {
       setLastRecoveryCheckpointAt(
@@ -348,6 +419,7 @@ export default function App() {
       cancelPendingRecoveryCheckpoint();
       setLastRecoveryCheckpointAt(null);
       const target = cleanDoc ?? docRef.current;
+      logDocumentLifecycle('recovery-draft-cleared', target);
       await clearRecoveryDraft(target.id, target.name);
     },
     [cancelPendingRecoveryCheckpoint]
@@ -364,62 +436,123 @@ export default function App() {
   }, []);
 
   /**
-   * Restores the persisted recovery draft (including document contents, original binary images,
-   * active page index, and `historyPast` / `historyFuture` Undo/Redo stacks) into active editor state.
+   * Restores the persisted recovery draft or active session document (including document contents,
+   * original binary images, active page index, and `historyPast` / `historyFuture` Undo/Redo stacks)
+   * into active editor state.
    */
-  const applyRestoredRecoveryDraft = useCallback(async (): Promise<boolean> => {
-    const restored = await restoreRecoveryDraft();
-    if (!restored) {
-      return false;
-    }
+  const applyRestoredRecoveryDraft = useCallback(
+    async (expectedSessionGen?: number): Promise<boolean> => {
+      if (
+        expectedSessionGen !== undefined &&
+        (documentSessionGenRef.current !== expectedSessionGen ||
+          hasUserReplacedOrEditedDocRef.current)
+      ) {
+        logDocumentLifecycle(
+          'recovery-restore-aborted-before-read-due-to-newer-session',
+          docRef.current,
+          {
+            expectedSessionGen,
+            currentSessionGen: documentSessionGenRef.current,
+          }
+        );
+        return false;
+      }
 
-    docRef.current = restored.doc;
-    activePageIndexRef.current = restored.activePageIndex;
-    historyPastRef.current = restored.historyPast;
-    historyFutureRef.current = restored.historyFuture;
-    isDirtyRef.current = true;
-    newModalAuthorisedRef.current = false;
+      const restored = await restoreRecoveryDraft();
+      if (!restored) {
+        return false;
+      }
 
-    setDoc(restored.doc);
-    setActivePageIndex(restored.activePageIndex);
-    setHistoryPast(restored.historyPast);
-    setHistoryFuture(restored.historyFuture);
-    // Never assume an earlier file handle is still writable after a restart
-    setActiveFileHandle(null);
-    setSelectedObjectId(null);
-    setSelectedObjectIds([]);
-    setSelectedGuideId(null);
-    setCroppingImageId(null);
-    setEditingTextId(null);
-    setIsDirty(true);
-    setLastSavedAt(null);
-    setLastRecoveryCheckpointAt(
-      new Date(restored.summary.savedAtIso).toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      })
-    );
-    markTabSessionDirty(restored.doc.id, restored.doc.name);
-    setIsRecoveryModalOpen(false);
-    setRecoveryDraftSummary(null);
-    recoveryReadyRef.current = true;
-    setIsRecoveryReady(true);
+      // Guard again after awaiting IndexedDB read in case the user opened a file while reading
+      if (
+        expectedSessionGen !== undefined &&
+        (documentSessionGenRef.current !== expectedSessionGen ||
+          hasUserReplacedOrEditedDocRef.current)
+      ) {
+        logDocumentLifecycle(
+          'recovery-restore-aborted-after-read-due-to-newer-session',
+          docRef.current,
+          {
+            expectedSessionGen,
+            currentSessionGen: documentSessionGenRef.current,
+            restoredDocId: restored.doc.id,
+          }
+        );
+        return false;
+      }
 
-    setTimeout(() => {
-      fitPageToWorkspace(restored.doc.widthMm, restored.doc.heightMm, 'page');
-    }, 50);
-    showToast('Draft restored locally');
-    return true;
-  }, [fitPageToWorkspace, showToast]);
+      const restoredIsDirty = restored.isDirty;
+      docRef.current = restored.doc;
+      activePageIndexRef.current = restored.activePageIndex;
+      historyPastRef.current = restored.historyPast;
+      historyFutureRef.current = restored.historyFuture;
+      isDirtyRef.current = restoredIsDirty;
+      newModalAuthorisedRef.current = false;
 
-  // Startup probe for IndexedDB availability & existing unsaved recovery draft (runs once on mount)
+      setDoc(restored.doc);
+      setActivePageIndex(restored.activePageIndex);
+      setHistoryPast(restored.historyPast);
+      setHistoryFuture(restored.historyFuture);
+      // Never assume an earlier file handle is still writable after a restart
+      setActiveFileHandle(null);
+      setSelectedObjectId(null);
+      setSelectedObjectIds([]);
+      setSelectedGuideId(null);
+      setCroppingImageId(null);
+      setEditingTextId(null);
+      setIsDirty(restoredIsDirty);
+      setLastSavedAt(null);
+
+      if (restoredIsDirty) {
+        setLastRecoveryCheckpointAt(
+          new Date(restored.summary.savedAtIso).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        );
+        markTabSessionDirty(restored.doc.id, restored.doc.name);
+      } else {
+        setLastRecoveryCheckpointAt(null);
+        markTabSessionClean(restored.doc.id, restored.doc.name, true);
+      }
+
+      setIsRecoveryModalOpen(false);
+      setRecoveryDraftSummary(null);
+      recoveryReadyRef.current = true;
+      setIsRecoveryReady(true);
+
+      logDocumentLifecycle('recovery-session-restored', restored.doc, {
+        isDirty: restoredIsDirty,
+        undoCount: restored.historyPast.length,
+        redoCount: restored.historyFuture.length,
+      });
+
+      setTimeout(() => {
+        fitPageToWorkspace(restored.doc.widthMm, restored.doc.heightMm, 'page');
+      }, 50);
+
+      if (restoredIsDirty) {
+        showToast('Draft restored locally');
+      }
+      return true;
+    },
+    [fitPageToWorkspace, showToast]
+  );
+
+  // Startup probe for IndexedDB availability & existing recovery draft / active session document (runs once on mount)
   useEffect(() => {
     if (hasCheckedStartupRecoveryRef.current) return;
     hasCheckedStartupRecoveryRef.current = true;
 
+    const startupSessionGen = documentSessionGenRef.current;
     let cancelled = false;
+
     (async () => {
+      logDocumentLifecycle('startup-recovery-check-start', docRef.current, {
+        startupSessionGen,
+      });
+
       const diag = await probeRecoveryStorage();
       if (cancelled) return;
       if (!diag.available) {
@@ -434,20 +567,57 @@ export default function App() {
 
       const existingSummary = await peekRecoveryDraftSummary();
       if (cancelled) return;
-      if (existingSummary && !isDirtyRef.current) {
+
+      // Never overwrite a document that the user has already opened, replaced, or edited since mount
+      if (
+        documentSessionGenRef.current !== startupSessionGen ||
+        hasUserReplacedOrEditedDocRef.current ||
+        isDirtyRef.current
+      ) {
+        logDocumentLifecycle(
+          'startup-recovery-skipped-active-user-document',
+          docRef.current,
+          {
+            startupSessionGen,
+            currentSessionGen: documentSessionGenRef.current,
+          }
+        );
+        recoveryReadyRef.current = true;
+        setIsRecoveryReady(true);
+        return;
+      }
+
+      if (existingSummary) {
         if (existingSummary.isSameActiveTabSession) {
-          // Quiet automatic recovery when the browser reloaded the exact same active tab editing session
-          const restoredOk = await applyRestoredRecoveryDraft();
-          if (!cancelled && !restoredOk) {
+          // Quiet automatic restoration when the browser/preview reloaded the exact same active session
+          const restoredOk = await applyRestoredRecoveryDraft(startupSessionGen);
+          if (
+            !cancelled &&
+            !restoredOk &&
+            documentSessionGenRef.current === startupSessionGen &&
+            !hasUserReplacedOrEditedDocRef.current &&
+            existingSummary.isDirty
+          ) {
             setRecoveryDraftSummary(existingSummary);
             setIsRecoveryModalOpen(true);
+          } else {
+            recoveryReadyRef.current = true;
+            setIsRecoveryReady(true);
           }
-        } else {
-          // Interrupted session from a previous browser launch or another tab: ask for confirmation
+        } else if (existingSummary.isDirty) {
+          // Interrupted dirty session from a previous browser launch or another tab: ask for confirmation
+          logDocumentLifecycle('startup-recovery-modal-prompted', docRef.current, {
+            draftDocId: existingSummary.documentId,
+            draftDocName: existingSummary.documentName,
+          });
           setRecoveryDraftSummary(existingSummary);
           setIsRecoveryModalOpen(true);
+        } else {
+          recoveryReadyRef.current = true;
+          setIsRecoveryReady(true);
         }
       } else {
+        logDocumentLifecycle('startup-recovery-no-existing-draft', docRef.current);
         recoveryReadyRef.current = true;
         setIsRecoveryReady(true);
       }
@@ -1101,15 +1271,6 @@ export default function App() {
    * - In environments where `FileSystemFileHandle` is unavailable, opens `SaveAsModal` for the
    *   download fallback.
    */
-  /**
-   * Standard Save (`Ctrl/Cmd+S` or Save button):
-   * - If `activeFileHandle` exists, overwrites the same `.lay` file in place via `createWritable()`
-   *   without opening a Save As dialog or creating duplicate downloads.
-   * - If the document has never been saved (or was opened without a writable handle), prompts once
-   *   for a filename and location, retains the returned handle, and writes the `.lay` file.
-   * - In environments where `FileSystemFileHandle` is unavailable, opens `SaveAsModal` for the
-   *   download fallback.
-   */
   const handleSaveDocument = useCallback(async (): Promise<SaveDocumentOutcome> => {
     if (isSavingRef.current) return 'cancelled';
     isSavingRef.current = true;
@@ -1139,14 +1300,21 @@ export default function App() {
       }
 
       if (res.status === 'saved-native') {
-        setActiveFileHandle(res.fileHandle);
-        setDoc((prev) => ({
-          ...prev,
+        const updatedDoc: PageLayDocument = {
+          ...docRef.current,
           name: res.documentName,
           updatedAt: new Date().toISOString(),
-        }));
-        markClean();
-        void resolveAndClearRecoveryDraft();
+        };
+        docRef.current = updatedDoc;
+        setActiveFileHandle(res.fileHandle);
+        setDoc(updatedDoc);
+        markClean(true);
+        void persistCleanActiveDocumentCheckpoint(
+          updatedDoc,
+          activePageIndexRef.current,
+          historyPastRef.current,
+          historyFutureRef.current
+        );
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -1173,7 +1341,7 @@ export default function App() {
     activeFileHandle,
     flushRecoveryCheckpointNow,
     markClean,
-    resolveAndClearRecoveryDraft,
+    persistCleanActiveDocumentCheckpoint,
     showToast,
   ]);
 
@@ -1210,14 +1378,21 @@ export default function App() {
       }
 
       if (res.status === 'saved-native') {
-        setActiveFileHandle(res.fileHandle);
-        setDoc((prev) => ({
-          ...prev,
+        const updatedDoc: PageLayDocument = {
+          ...docRef.current,
           name: res.documentName,
           updatedAt: new Date().toISOString(),
-        }));
-        markClean();
-        void resolveAndClearRecoveryDraft();
+        };
+        docRef.current = updatedDoc;
+        setActiveFileHandle(res.fileHandle);
+        setDoc(updatedDoc);
+        markClean(true);
+        void persistCleanActiveDocumentCheckpoint(
+          updatedDoc,
+          activePageIndexRef.current,
+          historyPastRef.current,
+          historyFutureRef.current
+        );
         setLastSavedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         );
@@ -1238,7 +1413,7 @@ export default function App() {
     activeFileHandle,
     flushRecoveryCheckpointNow,
     markClean,
-    resolveAndClearRecoveryDraft,
+    persistCleanActiveDocumentCheckpoint,
     showToast,
   ]);
 
@@ -1248,6 +1423,10 @@ export default function App() {
    * Returns `true` if the caller should fall back to `<input type="file">`.
    */
   const handleTriggerOpenNativePicker = useCallback(async (): Promise<boolean> => {
+    if (!canUseNativeOpenFilePickerSync()) {
+      return true;
+    }
+    const openAttemptGen = ++documentSessionGenRef.current;
     try {
       const res = await openDocumentWithNativePicker();
       if (res.status === 'unsupported') {
@@ -1256,7 +1435,17 @@ export default function App() {
       if (res.status === 'cancelled' || !res.doc) {
         return false;
       }
+      // Guard against a newer document session having started while the native picker was open
+      if (documentSessionGenRef.current !== openAttemptGen) {
+        logDocumentLifecycle(
+          'open-native-picker-ignored-stale-generation',
+          res.doc,
+          { openAttemptGen, currentGen: documentSessionGenRef.current }
+        );
+        return false;
+      }
       const loaded = res.doc;
+      hasUserReplacedOrEditedDocRef.current = true;
       docRef.current = loaded;
       activePageIndexRef.current = 0;
       setDoc(loaded);
@@ -1267,12 +1456,15 @@ export default function App() {
       setSelectedGuideId(null);
       setCroppingImageId(null);
       setEditingTextId(null);
+      setIsRecoveryModalOpen(false);
+      setRecoveryDraftSummary(null);
       clearHistory();
-      markClean();
-      void resolveAndClearRecoveryDraft();
+      markClean(true);
+      void persistCleanActiveDocumentCheckpoint(loaded, 0, [], []);
       setLastSavedAt(
         new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       );
+      logDocumentLifecycle('opened-lay-via-native-picker', loaded);
       setTimeout(() => {
         fitPageToWorkspace(loaded.widthMm, loaded.heightMm, 'page');
       }, 50);
@@ -1289,7 +1481,7 @@ export default function App() {
     clearHistory,
     fitPageToWorkspace,
     markClean,
-    resolveAndClearRecoveryDraft,
+    persistCleanActiveDocumentCheckpoint,
     showToast,
   ]);
 
@@ -1577,8 +1769,26 @@ export default function App() {
    */
   const openLayFileAndApply = useCallback(
     async (file: File) => {
+      // Claim a new document session generation immediately so any in-flight startup recovery cannot overwrite
+      const openGen = ++documentSessionGenRef.current;
+      hasUserReplacedOrEditedDocRef.current = true;
+      logDocumentLifecycle('open-lay-file-started', docRef.current, {
+        fileName: file.name,
+        fileSize: file.size,
+        openGen,
+      });
+
       try {
         const loadedDoc = await loadDocumentFromLayFile(file);
+        if (documentSessionGenRef.current !== openGen) {
+          logDocumentLifecycle(
+            'open-lay-file-ignored-stale-generation',
+            loadedDoc,
+            { openGen, currentGen: documentSessionGenRef.current }
+          );
+          return;
+        }
+
         docRef.current = loadedDoc;
         activePageIndexRef.current = 0;
         setDoc(loadedDoc);
@@ -1590,10 +1800,16 @@ export default function App() {
         setSelectedGuideId(null);
         setCroppingImageId(null);
         setEditingTextId(null);
+        setIsRecoveryModalOpen(false);
+        setRecoveryDraftSummary(null);
         clearHistory();
-        markClean();
-        void resolveAndClearRecoveryDraft();
+        markClean(true);
+        // Persist the newly opened document as the active session document in IndexedDB so that if the
+        // mobile browser or AI Studio preview remounts 2–3 seconds after returning from the file picker,
+        // this opened document is seamlessly restored instead of reverting to a blank A0 layout.
+        void persistCleanActiveDocumentCheckpoint(loadedDoc, 0, [], []);
         setLastSavedAt(null);
+        logDocumentLifecycle('open-lay-file-applied', loadedDoc, { openGen });
         setTimeout(() => {
           fitPageToWorkspace(loadedDoc.widthMm, loadedDoc.heightMm, 'page');
         }, 50);
@@ -1611,7 +1827,7 @@ export default function App() {
       clearHistory,
       fitPageToWorkspace,
       markClean,
-      resolveAndClearRecoveryDraft,
+      persistCleanActiveDocumentCheckpoint,
       showToast,
     ]
   );
@@ -1620,8 +1836,12 @@ export default function App() {
    * Immediately loads the rich A0 Exhibition Stand Layout sample document.
    */
   const loadSampleDocumentImmediate = useCallback(async () => {
+    const sampleGen = ++documentSessionGenRef.current;
+    hasUserReplacedOrEditedDocRef.current = true;
     try {
       const sampleDoc = await createSampleExhibitionDocument();
+      if (documentSessionGenRef.current !== sampleGen) return;
+
       docRef.current = sampleDoc;
       activePageIndexRef.current = 0;
       setDoc(sampleDoc);
@@ -1632,10 +1852,13 @@ export default function App() {
       setSelectedGuideId(null);
       setCroppingImageId(null);
       setEditingTextId(null);
+      setIsRecoveryModalOpen(false);
+      setRecoveryDraftSummary(null);
       clearHistory();
-      markClean();
-      void resolveAndClearRecoveryDraft();
+      markClean(true);
+      void persistCleanActiveDocumentCheckpoint(sampleDoc, 0, [], []);
       setLastSavedAt(null);
+      logDocumentLifecycle('sample-document-loaded', sampleDoc, { sampleGen });
       setTimeout(() => {
         fitPageToWorkspace(sampleDoc.widthMm, sampleDoc.heightMm, 'page');
       }, 50);
@@ -1650,7 +1873,7 @@ export default function App() {
     clearHistory,
     fitPageToWorkspace,
     markClean,
-    resolveAndClearRecoveryDraft,
+    persistCleanActiveDocumentCheckpoint,
     showToast,
   ]);
 
@@ -1668,6 +1891,8 @@ export default function App() {
         case 'create-blank': {
           newModalAuthorisedRef.current = false;
           setIsNewModalOpen(false);
+          ++documentSessionGenRef.current;
+          hasUserReplacedOrEditedDocRef.current = true;
           const fresh = createNewDocument(
             action.name,
             action.paperSize,
@@ -1687,10 +1912,13 @@ export default function App() {
           setSelectedGuideId(null);
           setCroppingImageId(null);
           setEditingTextId(null);
+          setIsRecoveryModalOpen(false);
+          setRecoveryDraftSummary(null);
           clearHistory();
-          markClean();
-          void resolveAndClearRecoveryDraft();
+          markClean(true);
+          void persistCleanActiveDocumentCheckpoint(fresh, 0, [], []);
           setLastSavedAt(null);
+          logDocumentLifecycle('created-blank-document', fresh);
           setTimeout(() => {
             fitPageToWorkspace(action.widthMm, action.heightMm, 'page');
           }, 50);
@@ -1701,6 +1929,12 @@ export default function App() {
         }
         case 'open-picker': {
           newModalAuthorisedRef.current = false;
+          // Synchronously check if native picker is usable in this frame before awaiting any promise
+          // so `<input type="file">` is triggered directly inside the user's tap gesture on mobile.
+          if (!canUseNativeOpenFilePickerSync()) {
+            hiddenLayInputRef.current?.click();
+            return;
+          }
           const useFallbackInput = await handleTriggerOpenNativePicker();
           if (useFallbackInput) {
             hiddenLayInputRef.current?.click();
@@ -1727,7 +1961,7 @@ export default function App() {
       loadSampleDocumentImmediate,
       markClean,
       openLayFileAndApply,
-      resolveAndClearRecoveryDraft,
+      persistCleanActiveDocumentCheckpoint,
       showToast,
     ]
   );
@@ -2627,13 +2861,20 @@ export default function App() {
             if (res.status === 'saved-native') {
               setActiveFileHandle(res.fileHandle);
             }
-            setDoc((prev) => ({
-              ...prev,
+            const updatedDoc: PageLayDocument = {
+              ...docRef.current,
               name: res.documentName,
               updatedAt: new Date().toISOString(),
-            }));
-            markClean();
-            void resolveAndClearRecoveryDraft();
+            };
+            docRef.current = updatedDoc;
+            setDoc(updatedDoc);
+            markClean(true);
+            void persistCleanActiveDocumentCheckpoint(
+              updatedDoc,
+              activePageIndexRef.current,
+              historyPastRef.current,
+              historyFutureRef.current
+            );
             setLastSavedAt(
               new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             );

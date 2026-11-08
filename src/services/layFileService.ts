@@ -461,17 +461,35 @@ export async function saveDocumentAsLayFileWithPicker(
 }
 
 /**
+ * Synchronously checks whether `window.showOpenFilePicker` is available and permitted
+ * (returns `false` in cross-origin iframes and mobile browsers so `<input type="file">`
+ * can be triggered synchronously without losing the user's tap gesture activation).
+ */
+export function canUseNativeOpenFilePickerSync(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (window.self !== window.top) return false;
+  } catch {
+    return false;
+  }
+  const picker = (window as unknown as { showOpenFilePicker?: NativeOpenFilePicker })
+    .showOpenFilePicker;
+  return typeof picker === 'function';
+}
+
+/**
  * Opens an existing `.lay` document using `showOpenFilePicker()` where supported and permitted,
  * retaining the `FileSystemFileHandle` so subsequent Save operations overwrite the opened file directly.
  * Returns `{ status: 'unsupported' }` if the browser does not support `showOpenFilePicker` or blocks it,
  * allowing the caller to fall back to `<input type="file">`.
  */
 export async function openDocumentWithNativePicker(): Promise<OpenLayPickerResult> {
-  const picker =
-    typeof window !== 'undefined'
-      ? (window as unknown as { showOpenFilePicker?: NativeOpenFilePicker })
-          .showOpenFilePicker
-      : undefined;
+  if (!canUseNativeOpenFilePickerSync()) {
+    return { status: 'unsupported' };
+  }
+
+  const picker = (window as unknown as { showOpenFilePicker?: NativeOpenFilePicker })
+    .showOpenFilePicker;
 
   if (typeof picker !== 'function') {
     return { status: 'unsupported' };
