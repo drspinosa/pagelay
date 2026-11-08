@@ -645,6 +645,26 @@ export default function App() {
   const selectedObject =
     currentPage.objects.find((o) => o.id === selectedObjectId) || null;
 
+  const hasDeletableObjectSelection =
+    selectedObjectIds.length > 0
+      ? currentPage.objects.some(
+          (o) => selectedObjectIds.includes(o.id) && !o.locked
+        )
+      : Boolean(selectedObject && !selectedObject.locked);
+
+  const hasDeletableGuideSelection =
+    !hasDeletableObjectSelection &&
+    !selectedObject &&
+    selectedObjectIds.length === 0 &&
+    Boolean(
+      selectedGuideId &&
+        !doc.lockGuides &&
+        currentPage.guidelines.some((g) => g.id === selectedGuideId)
+    );
+
+  const canDeleteSelected =
+    hasDeletableObjectSelection || hasDeletableGuideSelection;
+
   /**
    * Computes a zoom level and pan offset that fits and centers the currently selected object(s) within the viewport.
    */
@@ -882,12 +902,23 @@ export default function App() {
   );
 
   /**
-   * Deletes an object by ID from the active page.
+   * Deletes an unlocked object by ID from the active page.
    */
   const handleDeleteObject = useCallback(
     (id: string) => {
-      pushHistory(docRef.current);
       const prev = docRef.current;
+      const targetPage = prev.pages[activePageIndex] || prev.pages[0];
+      const targetObj = targetPage?.objects.find((o) => o.id === id);
+      if (!targetObj) return;
+      if (targetObj.locked) {
+        showToast(
+          `"${targetObj.name}" is locked. Unlock it first (Ctrl+L) to delete.`,
+          'info'
+        );
+        return;
+      }
+
+      pushHistory(prev);
       const nextPages = prev.pages.map((p, idx) =>
         idx === activePageIndex
           ? { ...p, objects: p.objects.filter((o) => o.id !== id) }
@@ -905,8 +936,117 @@ export default function App() {
       if (croppingImageId === id) setCroppingImageId(null);
       if (editingTextId === id) setEditingTextId(null);
     },
-    [activePageIndex, selectedObjectId, croppingImageId, editingTextId, pushHistory]
+    [
+      activePageIndex,
+      selectedObjectId,
+      croppingImageId,
+      editingTextId,
+      pushHistory,
+      showToast,
+    ]
   );
+
+  /**
+   * Shared deletion callback for both the floating canvas Delete button and keyboard Delete/Backspace:
+   * - Deletes a single selected unlocked object or multiple selected unlocked objects in one Undo operation.
+   * - Respects locked objects and leaves them intact.
+   * - If only a guideline is selected, deletes it when guides are unlocked.
+   */
+  const handleDeleteSelected = useCallback((): boolean => {
+    const prev = docRef.current;
+    const page = prev.pages[activePageIndex] || prev.pages[0];
+    if (!page) return false;
+
+    const selectedIdSet = new Set(
+      selectedObjectIds.length > 0
+        ? selectedObjectIds
+        : selectedObjectId
+        ? [selectedObjectId]
+        : []
+    );
+
+    const selectedObjs = page.objects.filter((o) => selectedIdSet.has(o.id));
+    if (selectedObjs.length > 0) {
+      const unlockedToDelete = selectedObjs.filter((o) => !o.locked);
+      const lockedRemaining = selectedObjs.filter((o) => o.locked);
+
+      if (unlockedToDelete.length === 0) {
+        showToast(
+          selectedObjs.length === 1
+            ? `"${selectedObjs[0].name}" is locked. Unlock it first (Ctrl+L) to delete.`
+            : 'Selected objects are locked. Unlock them first (Ctrl+L) to delete.',
+          'info'
+        );
+        return false;
+      }
+
+      if (unlockedToDelete.length === 1 && lockedRemaining.length === 0) {
+        handleDeleteObject(unlockedToDelete[0].id);
+        return true;
+      }
+
+      const deleteIdSet = new Set(unlockedToDelete.map((o) => o.id));
+      pushHistory(prev);
+      const nextPages = prev.pages.map((p, idx) =>
+        idx === activePageIndex
+          ? { ...p, objects: p.objects.filter((o) => !deleteIdSet.has(o.id)) }
+          : p
+      );
+      const nextDoc: PageLayDocument = {
+        ...prev,
+        pages: nextPages,
+        updatedAt: new Date().toISOString(),
+      };
+      docRef.current = nextDoc;
+      setDoc(nextDoc);
+
+      const remainingIds = lockedRemaining.map((o) => o.id);
+      setSelectedObjectIds(remainingIds);
+      setSelectedObjectId(remainingIds[remainingIds.length - 1] ?? null);
+      if (croppingImageId && deleteIdSet.has(croppingImageId)) {
+        setCroppingImageId(null);
+      }
+      if (editingTextId && deleteIdSet.has(editingTextId)) {
+        setEditingTextId(null);
+      }
+      return true;
+    }
+
+    if (selectedGuideId && !prev.lockGuides) {
+      const hasGuide = page.guidelines.some((g) => g.id === selectedGuideId);
+      if (!hasGuide) return false;
+      pushHistory(prev);
+      const nextPages = prev.pages.map((p, idx) =>
+        idx === activePageIndex
+          ? {
+              ...p,
+              guidelines: p.guidelines.filter((g) => g.id !== selectedGuideId),
+            }
+          : p
+      );
+      const nextDoc: PageLayDocument = {
+        ...prev,
+        pages: nextPages,
+        updatedAt: new Date().toISOString(),
+      };
+      docRef.current = nextDoc;
+      setDoc(nextDoc);
+      setSelectedGuideId(null);
+      return true;
+    }
+
+    return false;
+  }, [
+    activePageIndex,
+    selectedObjectIds,
+    selectedObjectId,
+    selectedGuideId,
+    croppingImageId,
+    editingTextId,
+    handleDeleteObject,
+    pushHistory,
+    showToast,
+  ]);
 
   /**
    * Duplicates an object on the active page.
@@ -1337,47 +1477,13 @@ export default function App() {
 
       // Delete / Backspace: delete selected object(s) or selected guideline
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedObjectIds.length > 1) {
+        if (
+          selectedObjectIds.length > 0 ||
+          selectedObject ||
+          (selectedGuideId && !doc.lockGuides)
+        ) {
           e.preventDefault();
-          const idSet = new Set(selectedObjectIds);
-          pushHistory(docRef.current);
-          setDoc((prev) => ({
-            ...prev,
-            pages: prev.pages.map((p, idx) =>
-              idx === activePageIndex
-                ? { ...p, objects: p.objects.filter((o) => !idSet.has(o.id)) }
-                : p
-            ),
-            updatedAt: new Date().toISOString(),
-          }));
-          setSelectedObjectId(null);
-          setSelectedObjectIds([]);
-          setCroppingImageId(null);
-          setEditingTextId(null);
-          return;
-        }
-        if (selectedObject) {
-          e.preventDefault();
-          handleDeleteObject(selectedObject.id);
-          return;
-        }
-        if (selectedGuideId && !doc.lockGuides) {
-          e.preventDefault();
-          pushHistory(docRef.current);
-          setDoc((prev) => ({
-            ...prev,
-            pages: prev.pages.map((p, idx) =>
-              idx === activePageIndex
-                ? {
-                    ...p,
-                    guidelines: p.guidelines.filter((g) => g.id !== selectedGuideId),
-                  }
-                : p
-            ),
-            updatedAt: new Date().toISOString(),
-          }));
-          setSelectedGuideId(null);
-          return;
+          handleDeleteSelected();
         }
         return;
       }
@@ -1457,6 +1563,7 @@ export default function App() {
     handleGroupObjects,
     handleUngroupObject,
     handleDeleteObject,
+    handleDeleteSelected,
     handleDuplicateObject,
     handleAddObject,
     handleUpdateObject,
@@ -2175,6 +2282,8 @@ export default function App() {
           onCursorMoveMm={setCursorMm}
           onAddObject={handleAddObject}
           onDeleteObject={handleDeleteObject}
+          canDeleteSelected={canDeleteSelected}
+          onDeleteSelected={handleDeleteSelected}
           onUpdateObject={handleUpdateObject}
           onUpdateMultipleObjects={handleUpdateMultipleObjects}
           onRecordHistorySnapshot={() => pushHistory(docRef.current)}

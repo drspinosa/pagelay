@@ -34,6 +34,55 @@ import {
 import { exportPageToImageFile } from '../services/imageExportService';
 import { RecoveryDraftSummary } from '../services/recoveryDraftService';
 
+function isMobileOrCoarseDevice(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (window.innerWidth < 768) return true;
+  if (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function useVisualViewportCssVars(isOpen: boolean): void {
+  React.useEffect(() => {
+    if (!isOpen || typeof window === 'undefined') return;
+    const root = document.documentElement;
+
+    const syncViewportVars = () => {
+      const vv = window.visualViewport;
+      if (vv && vv.height > 80) {
+        root.style.setProperty('--vv-height', `${Math.round(vv.height)}px`);
+        root.style.setProperty(
+          '--vv-offset-top',
+          `${Math.max(0, Math.round(vv.offsetTop))}px`
+        );
+      } else {
+        root.style.setProperty('--vv-height', `${window.innerHeight}px`);
+        root.style.setProperty('--vv-offset-top', '0px');
+      }
+    };
+
+    syncViewportVars();
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', syncViewportVars);
+    vv?.addEventListener('scroll', syncViewportVars);
+    window.addEventListener('resize', syncViewportVars);
+    window.addEventListener('orientationchange', syncViewportVars);
+
+    return () => {
+      vv?.removeEventListener('resize', syncViewportVars);
+      vv?.removeEventListener('scroll', syncViewportVars);
+      window.removeEventListener('resize', syncViewportVars);
+      window.removeEventListener('orientationchange', syncViewportVars);
+      root.style.setProperty('--vv-height', '100dvh');
+      root.style.setProperty('--vv-offset-top', '0px');
+    };
+  }, [isOpen]);
+}
+
 interface NewDocumentModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -59,6 +108,8 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
   const [widthMm, setWidthMm] = useState(1189);
   const [heightMm, setHeightMm] = useState(841);
 
+  useVisualViewportCssVars(isOpen);
+
   if (!isOpen) return null;
 
   const handleSelectFormat = (fmt: PaperFormat, orient: Orientation) => {
@@ -72,8 +123,8 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-2 sm:p-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-lg max-h-[calc(100dvh-16px)] sm:max-h-[90dvh] flex flex-col overflow-hidden">
+    <div className="fixed inset-x-0 z-50 modal-viewport-overlay bg-slate-900/50 flex items-center justify-center p-2 sm:p-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-lg modal-viewport-card flex flex-col overflow-hidden">
         <div className="px-4 py-2.5 sm:px-5 sm:py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
           <h2 className="text-sm font-bold text-slate-900">Create New PageLay Document</h2>
           <button
@@ -649,18 +700,34 @@ export const SaveAsModal: React.FC<SaveAsModalProps> = ({
   const [nameInput, setNameInput] = useState(currentName);
   const [isSaving, setIsSaving] = useState(false);
   const [downloadedFilename, setDownloadedFilename] = useState<string | null>(null);
+  const [isInputFocused, setIsInputFocused] = useState(false);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
+  const blurTimeoutRef = React.useRef<number | null>(null);
+
+  useVisualViewportCssVars(isOpen);
 
   React.useEffect(() => {
     if (isOpen) {
       setNameInput(currentName);
       setIsSaving(false);
       setDownloadedFilename(null);
-      setTimeout(() => {
-        inputRef.current?.focus();
-        inputRef.current?.select();
-      }, 20);
+      setIsInputFocused(false);
+      // On desktop, automatically focus and select the filename field.
+      // On mobile/touch devices, avoid opening the on-screen keyboard until the user taps the field.
+      if (!isMobileOrCoarseDevice()) {
+        const timer = window.setTimeout(() => {
+          inputRef.current?.focus();
+          inputRef.current?.select();
+        }, 20);
+        return () => window.clearTimeout(timer);
+      }
     }
+    return () => {
+      if (blurTimeoutRef.current !== null) {
+        window.clearTimeout(blurTimeoutRef.current);
+        blurTimeoutRef.current = null;
+      }
+    };
   }, [isOpen, currentName]);
 
   if (!isOpen) return null;
@@ -695,13 +762,17 @@ export const SaveAsModal: React.FC<SaveAsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+    <div className="fixed inset-x-0 z-50 modal-viewport-overlay bg-slate-900/50 flex items-start sm:items-center justify-center p-2 sm:p-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-[max(0.5rem,env(safe-area-inset-bottom))] overflow-y-auto">
       <form
         onSubmit={handleSubmit}
-        className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-md overflow-hidden"
+        className={`bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-md modal-viewport-card ${
+          isInputFocused
+            ? 'max-sm:max-h-[min(56dvh,calc(var(--vv-height,100dvh)-16px))]'
+            : ''
+        } flex flex-col overflow-hidden`}
       >
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
-          <h2 className="text-sm font-bold text-slate-900">
+        <div className="px-4 py-2.5 sm:px-5 sm:py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
+          <h2 className="text-sm font-bold text-slate-900 truncate pr-2">
             {downloadedFilename
               ? 'Confirm Downloaded .lay Copy'
               : 'Save Document As (.lay)'}
@@ -709,15 +780,18 @@ export const SaveAsModal: React.FC<SaveAsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-slate-400 hover:text-slate-700 rounded"
+            className="p-1 text-slate-400 hover:text-slate-700 rounded shrink-0"
             aria-label="Cancel Save As"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {downloadedFilename ? (
-          <div className="p-5 space-y-3.5 text-xs">
+        <div
+          data-allow-touch-scroll="true"
+          className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y p-3.5 sm:p-5 space-y-2.5 sm:space-y-3.5 text-xs"
+        >
+          {downloadedFilename ? (
             <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg flex items-start gap-2.5 text-emerald-900">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
               <div className="space-y-1">
@@ -729,66 +803,82 @@ export const SaveAsModal: React.FC<SaveAsModalProps> = ({
                 </p>
               </div>
             </div>
-          </div>
-        ) : (
-          <div className="p-5 space-y-3.5 text-xs">
-            <div>
-              <label
-                htmlFor="save-as-doc-name"
-                className="block font-semibold text-slate-700 mb-1"
-              >
-                Document Name
-              </label>
-              <div className="flex items-center gap-1.5">
-                <input
-                  id="save-as-doc-name"
-                  ref={inputRef}
-                  type="text"
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') {
-                      e.preventDefault();
-                      onClose();
-                    }
-                  }}
-                  placeholder="Enter document name"
-                  className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white"
-                />
-                <span className="px-2.5 py-2 bg-slate-100 border border-slate-200 rounded-lg font-mono text-xs text-slate-600 select-none">
-                  .lay
-                </span>
+          ) : (
+            <>
+              <div>
+                <label
+                  htmlFor="save-as-doc-name"
+                  className="block font-semibold text-slate-700 mb-1"
+                >
+                  Document Name
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    id="save-as-doc-name"
+                    ref={inputRef}
+                    type="text"
+                    value={nameInput}
+                    onFocus={() => {
+                      if (blurTimeoutRef.current !== null) {
+                        window.clearTimeout(blurTimeoutRef.current);
+                        blurTimeoutRef.current = null;
+                      }
+                      setIsInputFocused(true);
+                    }}
+                    onBlur={() => {
+                      if (blurTimeoutRef.current !== null) {
+                        window.clearTimeout(blurTimeoutRef.current);
+                      }
+                      blurTimeoutRef.current = window.setTimeout(() => {
+                        blurTimeoutRef.current = null;
+                        setIsInputFocused(false);
+                      }, 180);
+                    }}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.preventDefault();
+                        onClose();
+                      }
+                    }}
+                    placeholder="Enter document name"
+                    className="flex-1 min-w-0 px-3 py-1.5 sm:py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white"
+                  />
+                  <span className="px-2.5 py-1.5 sm:py-2 bg-slate-100 border border-slate-200 rounded-lg font-mono text-xs text-slate-600 select-none shrink-0">
+                    .lay
+                  </span>
+                </div>
               </div>
-            </div>
 
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">Exported File:</span>
-                <span className="font-mono font-semibold text-slate-900 truncate max-w-[220px]">
-                  {cleanPreviewName}.lay
-                </span>
+              <div className="p-2.5 sm:p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 shrink-0">Exported File:</span>
+                  <span className="font-mono font-semibold text-slate-900 truncate max-w-[220px]">
+                    {cleanPreviewName}.lay
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 shrink-0">Internal Manifest Title:</span>
+                  <span className="font-mono font-medium text-slate-800 truncate max-w-[220px]">
+                    {cleanPreviewName}
+                  </span>
+                </div>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">Internal Manifest Title:</span>
-                <span className="font-mono font-medium text-slate-800 truncate max-w-[220px]">
-                  {cleanPreviewName}
-                </span>
+
+              <div className="space-y-1.5 text-[11px] text-slate-500 leading-relaxed">
+                <p>
+                  Updates the document title in PageLay and inside the saved{' '}
+                  <span className="font-mono">.lay</span> archive so both stay in sync.
+                </p>
+                <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5">
+                  Direct file overwrite is unavailable in this browser or embedded environment. Saving will download a new <span className="font-mono">.lay</span> file copy rather than overwriting an existing file on disk.
+                </p>
               </div>
-            </div>
+            </>
+          )}
+        </div>
 
-            <div className="space-y-1.5 text-[11px] text-slate-500 leading-relaxed">
-              <p>
-                Updates the document title in PageLay and inside the saved{' '}
-                <span className="font-mono">.lay</span> archive so both stay in sync.
-              </p>
-              <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5">
-                Direct file overwrite is unavailable in this browser or embedded environment. Saving will download a new <span className="font-mono">.lay</span> file copy rather than overwriting an existing file on disk.
-              </p>
-            </div>
-          </div>
-        )}
-
-        <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+        <div className="px-4 py-2.5 sm:px-5 sm:py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
           <button
             type="button"
             onClick={onClose}

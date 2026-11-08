@@ -29,6 +29,7 @@ import {
   ZoomOut,
   Group,
   Ungroup,
+  Trash2,
 } from 'lucide-react';
 import {
   ArrowObject,
@@ -96,6 +97,8 @@ interface EditorCanvasProps {
   onCursorMoveMm: (pos: { x: number; y: number } | null) => void;
   onAddObject: (obj: PageObject, enterEditText?: boolean, selectNewObject?: boolean) => void;
   onDeleteObject: (id: string) => void;
+  canDeleteSelected: boolean;
+  onDeleteSelected: () => void;
   onUpdateObject: (obj: PageObject, commitHistory: boolean) => void;
   onUpdateMultipleObjects: (objects: PageObject[], commitHistory: boolean) => void;
   onRecordHistorySnapshot: () => void;
@@ -242,6 +245,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   onCursorMoveMm,
   onAddObject,
   onDeleteObject,
+  canDeleteSelected,
+  onDeleteSelected,
   onUpdateObject,
   onUpdateMultipleObjects,
   onRecordHistorySnapshot,
@@ -4418,6 +4423,21 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
+
+          {canDeleteSelected && (
+            <>
+              <div className="w-px h-5 bg-slate-200 mx-0.5" />
+              <button
+                type="button"
+                onClick={onDeleteSelected}
+                className="w-10 h-10 min-w-[40px] min-h-[40px] rounded-md text-rose-600 bg-rose-50 hover:bg-rose-100 active:bg-rose-200 border border-rose-200/80 flex items-center justify-center transition-colors shrink-0"
+                title="Delete selected (Del)"
+                aria-label="Delete selected"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </>
+          )}
         </div>
       </div>
     </main>

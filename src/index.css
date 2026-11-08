@@ -1,6 +1,11 @@
 @import "tailwindcss";
 
 @layer base {
+  :root {
+    --vv-height: 100dvh;
+    --vv-offset-top: 0px;
+  }
+
   html,
   body,
   #root {
@@ -89,4 +94,20 @@
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+.modal-viewport-overlay {
+  top: var(--vv-offset-top, 0px);
+  height: var(--vv-height, 100dvh);
+  max-height: 100dvh;
+}
+
+.modal-viewport-card {
+  max-height: calc(var(--vv-height, 100dvh) - 16px);
+}
+
+@media (min-width: 640px) {
+  .modal-viewport-card {
+    max-height: min(90dvh, calc(var(--vv-height, 100dvh) - 32px));
+  }
 }

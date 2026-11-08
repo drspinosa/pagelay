@@ -379,6 +379,25 @@
     - Updated `RecoveryDraftModal` with the heading **"Continue editing your document?"**, reassuring copy (*"PageLay found a locally saved working draft of [document name]. You can continue where you left off."*), primary button **Continue Editing**, and secondary button **Discard Draft** protected by a two-step inline confirmation (**Keep Draft** vs **Permanently Discard**), while displaying the document name, last recovery timestamp, paper size, page/image count, and preserved Undo/Redo step counts.
     - Upon selecting **Continue Editing**, `restoreRecoveryDraft()` binds the checkpoint to the current `tabSessionId` in IndexedDB and `sessionStorage` so subsequent reloads in that tab recover quietly without re-prompting.
 
+### Milestone 26 — Mobile Delete Button in Floating Canvas Toolbar and Save As Modal Keyboard Fix
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Mobile Delete Button and Save As Modal Fix"*
+- **Engineering Changes**:
+  - **1. Floating Canvas Toolbar Delete Action (`src/components/EditorCanvas.tsx`, `src/App.tsx`, `src/components/PropertiesPanel.tsx`)**:
+    - Added a shared `handleDeleteSelected` callback and `canDeleteSelected` computed state in `src/App.tsx` used by both the desktop `Delete` / `Backspace` keyboard shortcuts and the floating bottom-right canvas toolbar:
+      - Deletes a single selected unlocked object or multiple selected unlocked objects together as a **single Undo operation** (`pushHistory`), marking the document dirty for Save and local IndexedDB recovery while keeping `doc.assets` intact so Undo and recovery retain full-resolution images.
+      - Strictly respects object locks (`o.locked`): locked objects cannot be deleted from the floating toolbar, keyboard shortcuts, or Properties Panel header until unlocked.
+      - Supports deleting a selected guideline when only a guideline is selected and `doc.lockGuides` is `false`.
+    - Updated the bottom-right floating toolbar in `src/components/EditorCanvas.tsx` to display a distinct `40 × 40 px` (`w-10 h-10 min-w-[40px] min-h-[40px]`) rose-tinted `Trash2` Delete button separated by a vertical divider next to the zoom controls exclusively when `canDeleteSelected` is `true`.
+  - **2. Mobile Save As Modal Keyboard & Viewport Scrolling (`src/components/Modals.tsx`, `src/index.css`)**:
+    - Added `useVisualViewportCssVars` in `src/components/Modals.tsx` and `.modal-viewport-overlay` / `.modal-viewport-card` in `src/index.css` to track `window.visualViewport` height and top offset when mobile on-screen keyboards appear.
+    - Updated `SaveAsModal` in `src/components/Modals.tsx` to match the responsive mobile pattern of `NewDocumentModal`:
+      - Pinned header (`shrink-0`) keeping the title and Close button visible.
+      - Independently scrollable form body (`flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y` with `data-allow-touch-scroll="true"`).
+      - Pinned footer (`shrink-0`) keeping **Cancel** / **Keep Current Document** and **Save .lay** / **Confirm Saved & Continue** accessible at all times, including in short landscape viewports and when the Android/iPhone on-screen keyboard is open (`items-start sm:items-center` + `max-sm:max-h-[min(56dvh,calc(var(--vv-height,100dvh)-16px))]` while editing the filename on mobile).
+      - Avoids automatically focusing the filename input on mobile/coarse-pointer devices when the modal first opens so the keyboard only appears when the user taps the field, while preserving automatic focus and filename selection on desktop.
+
 ---
 
 ## 3. Keyboard & Mouse Shortcuts Reference

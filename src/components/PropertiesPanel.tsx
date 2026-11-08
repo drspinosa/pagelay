@@ -1112,9 +1112,14 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
           </button>
           <button
             type="button"
+            disabled={Boolean(selectedObject.locked)}
             onClick={() => onDeleteObject(selectedObject.id)}
-            className="p-1 text-rose-600 hover:bg-rose-50 rounded"
-            title="Delete (Del)"
+            className="p-1 text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:hover:bg-transparent rounded"
+            title={
+              selectedObject.locked
+                ? 'Unlock object first (Ctrl+L) to delete'
+                : 'Delete (Del)'
+            }
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
