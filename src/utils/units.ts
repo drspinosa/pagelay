@@ -755,4 +755,565 @@ export function flattenPageObjects(
   return result;
 }
 
+export type MarqueeSelectionMode = 'window' | 'crossing';
+
+export interface SelectionRectMm {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+function isPointInSelectionRectMm(x: number, y: number, rect: SelectionRectMm): boolean {
+  return x >= rect.minX && x <= rect.maxX && y >= rect.minY && y <= rect.maxY;
+}
+
+function orientationSignMm(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number
+): number {
+  const val = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  if (Math.abs(val) <= 1e-9) return 0;
+  return val > 0 ? 1 : -1;
+}
+
+function isPointOnCollinearSegmentMm(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): boolean {
+  return (
+    px >= Math.min(ax, bx) - 1e-9 &&
+    px <= Math.max(ax, bx) + 1e-9 &&
+    py >= Math.min(ay, by) - 1e-9 &&
+    py <= Math.max(ay, by) + 1e-9
+  );
+}
+
+function doSegmentsIntersectMm(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
+  dx: number,
+  dy: number
+): boolean {
+  if (
+    Math.max(ax, bx) < Math.min(cx, dx) - 1e-9 ||
+    Math.min(ax, bx) > Math.max(cx, dx) + 1e-9 ||
+    Math.max(ay, by) < Math.min(cy, dy) - 1e-9 ||
+    Math.min(ay, by) > Math.max(cy, dy) + 1e-9
+  ) {
+    return false;
+  }
+
+  const o1 = orientationSignMm(ax, ay, bx, by, cx, cy);
+  const o2 = orientationSignMm(ax, ay, bx, by, dx, dy);
+  const o3 = orientationSignMm(cx, cy, dx, dy, ax, ay);
+  const o4 = orientationSignMm(cx, cy, dx, dy, bx, by);
+
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && isPointOnCollinearSegmentMm(cx, cy, ax, ay, bx, by)) return true;
+  if (o2 === 0 && isPointOnCollinearSegmentMm(dx, dy, ax, ay, bx, by)) return true;
+  if (o3 === 0 && isPointOnCollinearSegmentMm(ax, ay, cx, cy, dx, dy)) return true;
+  if (o4 === 0 && isPointOnCollinearSegmentMm(bx, by, cx, cy, dx, dy)) return true;
+
+  return false;
+}
+
+function doesSegmentIntersectSelectionRectMm(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  rect: SelectionRectMm
+): boolean {
+  if (
+    Math.max(x1, x2) < rect.minX - 1e-9 ||
+    Math.min(x1, x2) > rect.maxX + 1e-9 ||
+    Math.max(y1, y2) < rect.minY - 1e-9 ||
+    Math.min(y1, y2) > rect.maxY + 1e-9
+  ) {
+    return false;
+  }
+
+  if (isPointInSelectionRectMm(x1, y1, rect) || isPointInSelectionRectMm(x2, y2, rect)) {
+    return true;
+  }
+
+  return (
+    doSegmentsIntersectMm(x1, y1, x2, y2, rect.minX, rect.minY, rect.maxX, rect.minY) ||
+    doSegmentsIntersectMm(x1, y1, x2, y2, rect.maxX, rect.minY, rect.maxX, rect.maxY) ||
+    doSegmentsIntersectMm(x1, y1, x2, y2, rect.maxX, rect.maxY, rect.minX, rect.maxY) ||
+    doSegmentsIntersectMm(x1, y1, x2, y2, rect.minX, rect.maxY, rect.minX, rect.minY)
+  );
+}
+
+function isPointInPolygonMm(
+  px: number,
+  py: number,
+  vertices: ReadonlyArray<{ x: number; y: number }>
+): boolean {
+  if (vertices.length < 3) return false;
+
+  for (let i = 0; i < vertices.length; i++) {
+    const a = vertices[i];
+    const b = vertices[(i + 1) % vertices.length];
+    if (pointToSegmentDistanceMm(px, py, a.x, a.y, b.x, b.y) <= 1e-6) {
+      return true;
+    }
+  }
+
+  let inside = false;
+  for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
+    const xi = vertices[i].x;
+    const yi = vertices[i].y;
+    const xj = vertices[j].x;
+    const yj = vertices[j].y;
+
+    const intersects =
+      yi > py !== yj > py &&
+      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function isPolygonWindowSelectedMm(
+  vertices: ReadonlyArray<{ x: number; y: number }>,
+  rect: SelectionRectMm
+): boolean {
+  return (
+    vertices.length > 0 &&
+    vertices.every((v) => isPointInSelectionRectMm(v.x, v.y, rect))
+  );
+}
+
+function isPolygonCrossingSelectedMm(
+  vertices: ReadonlyArray<{ x: number; y: number }>,
+  rect: SelectionRectMm
+): boolean {
+  if (vertices.length === 0) return false;
+
+  let pMinX = Infinity;
+  let pMinY = Infinity;
+  let pMaxX = -Infinity;
+  let pMaxY = -Infinity;
+  for (const v of vertices) {
+    if (v.x < pMinX) pMinX = v.x;
+    if (v.y < pMinY) pMinY = v.y;
+    if (v.x > pMaxX) pMaxX = v.x;
+    if (v.y > pMaxY) pMaxY = v.y;
+  }
+
+  if (
+    pMaxX < rect.minX - 1e-9 ||
+    pMinX > rect.maxX + 1e-9 ||
+    pMaxY < rect.minY - 1e-9 ||
+    pMinY > rect.maxY + 1e-9
+  ) {
+    return false;
+  }
+
+  for (const v of vertices) {
+    if (isPointInSelectionRectMm(v.x, v.y, rect)) {
+      return true;
+    }
+  }
+
+  const rectCorners = [
+    { x: rect.minX, y: rect.minY },
+    { x: rect.maxX, y: rect.minY },
+    { x: rect.maxX, y: rect.maxY },
+    { x: rect.minX, y: rect.maxY },
+  ];
+  for (const corner of rectCorners) {
+    if (isPointInPolygonMm(corner.x, corner.y, vertices)) {
+      return true;
+    }
+  }
+
+  for (let i = 0; i < vertices.length; i++) {
+    const a = vertices[i];
+    const b = vertices[(i + 1) % vertices.length];
+    if (doesSegmentIntersectSelectionRectMm(a.x, a.y, b.x, b.y, rect)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getRotatedBoxCornersMm(
+  xMm: number,
+  yMm: number,
+  widthMm: number,
+  heightMm: number,
+  rotationDeg: number
+): { x: number; y: number }[] {
+  const corners = [
+    { x: xMm, y: yMm },
+    { x: xMm + widthMm, y: yMm },
+    { x: xMm + widthMm, y: yMm + heightMm },
+    { x: xMm, y: yMm + heightMm },
+  ];
+  if (Math.abs(rotationDeg || 0) <= 0.001) {
+    return corners;
+  }
+  const cx = xMm + widthMm / 2;
+  const cy = yMm + heightMm / 2;
+  const rad = (rotationDeg * Math.PI) / 180;
+  return corners.map((pt) => rotatePointAroundCenter(pt.x, pt.y, cx, cy, rad));
+}
+
+function getRotatedTriangleVerticesMm(
+  xMm: number,
+  yMm: number,
+  widthMm: number,
+  heightMm: number,
+  rotationDeg: number
+): { x: number; y: number }[] {
+  const vertices = [
+    { x: xMm + widthMm / 2, y: yMm },
+    { x: xMm + widthMm, y: yMm + heightMm },
+    { x: xMm, y: yMm + heightMm },
+  ];
+  if (Math.abs(rotationDeg || 0) <= 0.001) {
+    return vertices;
+  }
+  const cx = xMm + widthMm / 2;
+  const cy = yMm + heightMm / 2;
+  const rad = (rotationDeg * Math.PI) / 180;
+  return vertices.map((pt) => rotatePointAroundCenter(pt.x, pt.y, cx, cy, rad));
+}
+
+function isRotatedEllipseWindowSelectedMm(
+  xMm: number,
+  yMm: number,
+  widthMm: number,
+  heightMm: number,
+  rotationDeg: number,
+  rect: SelectionRectMm
+): boolean {
+  const rx = Math.max(0.05, widthMm / 2);
+  const ry = Math.max(0.05, heightMm / 2);
+  const cx = xMm + rx;
+  const cy = yMm + ry;
+  const rad = ((rotationDeg || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const halfExtentX = Math.hypot(rx * cos, ry * sin);
+  const halfExtentY = Math.hypot(rx * sin, ry * cos);
+
+  return (
+    cx - halfExtentX >= rect.minX &&
+    cx + halfExtentX <= rect.maxX &&
+    cy - halfExtentY >= rect.minY &&
+    cy + halfExtentY <= rect.maxY
+  );
+}
+
+function isRotatedEllipseCrossingSelectedMm(
+  xMm: number,
+  yMm: number,
+  widthMm: number,
+  heightMm: number,
+  rotationDeg: number,
+  rect: SelectionRectMm
+): boolean {
+  const rx = Math.max(0.05, widthMm / 2);
+  const ry = Math.max(0.05, heightMm / 2);
+  const cx = xMm + rx;
+  const cy = yMm + ry;
+  const rad = ((rotationDeg || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const halfExtentX = Math.hypot(rx * cos, ry * sin);
+  const halfExtentY = Math.hypot(rx * sin, ry * cos);
+
+  if (
+    cx + halfExtentX < rect.minX - 1e-9 ||
+    cx - halfExtentX > rect.maxX + 1e-9 ||
+    cy + halfExtentY < rect.minY - 1e-9 ||
+    cy - halfExtentY > rect.maxY + 1e-9
+  ) {
+    return false;
+  }
+
+  if (isPointInSelectionRectMm(cx, cy, rect)) {
+    return true;
+  }
+
+  // Map selection rect corners into unit-circle coordinates where the ellipse is u^2 + v^2 <= 1.
+  // Because affine transformations preserve straight lines and convexity, the rect intersects
+  // the ellipse iff the origin (0, 0) is inside the mapped quad (already checked via center in rect)
+  // or within distance 1 of any edge of the mapped quad.
+  const toUnitCircle = (px: number, py: number) => {
+    const dx = px - cx;
+    const dy = py - cy;
+    const lx = dx * cos + dy * sin;
+    const ly = -dx * sin + dy * cos;
+    return { x: lx / rx, y: ly / ry };
+  };
+
+  const quad = [
+    toUnitCircle(rect.minX, rect.minY),
+    toUnitCircle(rect.maxX, rect.minY),
+    toUnitCircle(rect.maxX, rect.maxY),
+    toUnitCircle(rect.minX, rect.maxY),
+  ];
+
+  for (let i = 0; i < 4; i++) {
+    const a = quad[i];
+    const b = quad[(i + 1) % 4];
+    if (pointToSegmentDistanceMm(0, 0, a.x, a.y, b.x, b.y) <= 1 + 1e-6) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getRotatedFreehandPointsMm(stroke: FreehandStrokeObject): { x: number; y: number }[] {
+  if (!stroke.pointsMm || stroke.pointsMm.length === 0) {
+    return getRotatedBoxCornersMm(
+      stroke.xMm,
+      stroke.yMm,
+      stroke.widthMm,
+      stroke.heightMm,
+      stroke.rotationDeg
+    );
+  }
+  const rotDeg = stroke.rotationDeg || 0;
+  if (Math.abs(rotDeg) <= 0.001) {
+    return stroke.pointsMm.map((p) => ({ x: p.xMm, y: p.yMm }));
+  }
+  const cx = stroke.xMm + stroke.widthMm / 2;
+  const cy = stroke.yMm + stroke.heightMm / 2;
+  const rad = (rotDeg * Math.PI) / 180;
+  return stroke.pointsMm.map((p) => rotatePointAroundCenter(p.xMm, p.yMm, cx, cy, rad));
+}
+
+function getDimensionWitnessSegmentsMm(obj: DimensionObject): [
+  { x1: number; y1: number; x2: number; y2: number },
+  { x1: number; y1: number; x2: number; y2: number }
+] {
+  const angleRad = Math.atan2(obj.y2Mm - obj.y1Mm, obj.x2Mm - obj.x1Mm);
+  const halfExt = (obj.extensionHeightMm || 10) / 2;
+  const perpX = -Math.sin(angleRad) * halfExt;
+  const perpY = Math.cos(angleRad) * halfExt;
+  return [
+    {
+      x1: obj.x1Mm - perpX,
+      y1: obj.y1Mm - perpY,
+      x2: obj.x1Mm + perpX,
+      y2: obj.y1Mm + perpY,
+    },
+    {
+      x1: obj.x2Mm - perpX,
+      y1: obj.y2Mm - perpY,
+      x2: obj.x2Mm + perpX,
+      y2: obj.y2Mm + perpY,
+    },
+  ];
+}
+
+/**
+ * Returns true if `obj` is completely enclosed by `rect` (CAD Window selection).
+ */
+export function isObjectWindowSelectedMm(
+  obj: PageObject,
+  rect: SelectionRectMm
+): boolean {
+  if (obj.type === 'group') {
+    if (obj.children.length === 0) {
+      return isPolygonWindowSelectedMm(
+        getRotatedBoxCornersMm(
+          obj.xMm,
+          obj.yMm,
+          obj.widthMm,
+          obj.heightMm,
+          obj.rotationDeg
+        ),
+        rect
+      );
+    }
+    return obj.children.every((child) => isObjectWindowSelectedMm(child, rect));
+  }
+
+  if (obj.type === 'line' || obj.type === 'arrow' || obj.type === 'dimension') {
+    return (
+      isPointInSelectionRectMm(obj.x1Mm, obj.y1Mm, rect) &&
+      isPointInSelectionRectMm(obj.x2Mm, obj.y2Mm, rect)
+    );
+  }
+
+  if (obj.type === 'freehand') {
+    const pts = getRotatedFreehandPointsMm(obj);
+    return pts.length > 0 && pts.every((p) => isPointInSelectionRectMm(p.x, p.y, rect));
+  }
+
+  if (obj.type === 'ellipse' || obj.type === 'circle') {
+    return isRotatedEllipseWindowSelectedMm(
+      obj.xMm,
+      obj.yMm,
+      obj.widthMm,
+      obj.heightMm,
+      obj.rotationDeg,
+      rect
+    );
+  }
+
+  if (obj.type === 'triangle') {
+    return isPolygonWindowSelectedMm(
+      getRotatedTriangleVerticesMm(
+        obj.xMm,
+        obj.yMm,
+        obj.widthMm,
+        obj.heightMm,
+        obj.rotationDeg
+      ),
+      rect
+    );
+  }
+
+  return isPolygonWindowSelectedMm(
+    getRotatedBoxCornersMm(
+      obj.xMm,
+      obj.yMm,
+      obj.widthMm,
+      obj.heightMm,
+      obj.rotationDeg
+    ),
+    rect
+  );
+}
+
+/**
+ * Returns true if `obj` is enclosed by or intersects `rect` (CAD Crossing selection).
+ */
+export function isObjectCrossingSelectedMm(
+  obj: PageObject,
+  rect: SelectionRectMm
+): boolean {
+  if (obj.type === 'group') {
+    if (obj.children.length === 0) {
+      return isPolygonCrossingSelectedMm(
+        getRotatedBoxCornersMm(
+          obj.xMm,
+          obj.yMm,
+          obj.widthMm,
+          obj.heightMm,
+          obj.rotationDeg
+        ),
+        rect
+      );
+    }
+    return obj.children.some((child) => isObjectCrossingSelectedMm(child, rect));
+  }
+
+  if (obj.type === 'line' || obj.type === 'arrow' || obj.type === 'dimension') {
+    if (doesSegmentIntersectSelectionRectMm(obj.x1Mm, obj.y1Mm, obj.x2Mm, obj.y2Mm, rect)) {
+      return true;
+    }
+    if (obj.type === 'dimension') {
+      const [w1, w2] = getDimensionWitnessSegmentsMm(obj);
+      return (
+        doesSegmentIntersectSelectionRectMm(w1.x1, w1.y1, w1.x2, w1.y2, rect) ||
+        doesSegmentIntersectSelectionRectMm(w2.x1, w2.y1, w2.x2, w2.y2, rect)
+      );
+    }
+    return false;
+  }
+
+  if (obj.type === 'freehand') {
+    const pts = getRotatedFreehandPointsMm(obj);
+    if (pts.length === 0) return false;
+    const strokePad = Math.max(0.25, (obj.strokeWidthMm || 0.8) / 2);
+    const expandedRect: SelectionRectMm = {
+      minX: rect.minX - strokePad,
+      minY: rect.minY - strokePad,
+      maxX: rect.maxX + strokePad,
+      maxY: rect.maxY + strokePad,
+    };
+    if (pts.length === 1) {
+      return isPointInSelectionRectMm(pts[0].x, pts[0].y, expandedRect);
+    }
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (
+        doesSegmentIntersectSelectionRectMm(
+          pts[i].x,
+          pts[i].y,
+          pts[i + 1].x,
+          pts[i + 1].y,
+          expandedRect
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (obj.type === 'ellipse' || obj.type === 'circle') {
+    return isRotatedEllipseCrossingSelectedMm(
+      obj.xMm,
+      obj.yMm,
+      obj.widthMm,
+      obj.heightMm,
+      obj.rotationDeg,
+      rect
+    );
+  }
+
+  if (obj.type === 'triangle') {
+    return isPolygonCrossingSelectedMm(
+      getRotatedTriangleVerticesMm(
+        obj.xMm,
+        obj.yMm,
+        obj.widthMm,
+        obj.heightMm,
+        obj.rotationDeg
+      ),
+      rect
+    );
+  }
+
+  return isPolygonCrossingSelectedMm(
+    getRotatedBoxCornersMm(
+      obj.xMm,
+      obj.yMm,
+      obj.widthMm,
+      obj.heightMm,
+      obj.rotationDeg
+    ),
+    rect
+  );
+}
+
+/**
+ * Computes the IDs of all top-level PageObjects matching the given CAD selection rectangle
+ * and mode ('window' = left-to-right enclosed only, 'crossing' = right-to-left enclosed or intersecting).
+ * Preserves Z-order and treats GroupObjects as single selectable entities.
+ */
+export function getObjectsInMarqueeSelectionMm(
+  objects: PageObject[],
+  rect: SelectionRectMm,
+  mode: MarqueeSelectionMode
+): string[] {
+  const testFn =
+    mode === 'window' ? isObjectWindowSelectedMm : isObjectCrossingSelectedMm;
+  return objects.filter((obj) => testFn(obj, rect)).map((obj) => obj.id);
+}
+
+
 

@@ -57,7 +57,9 @@ import {
   getCombinedBoundsMm,
   getLineLengthMm,
   getObjectBoundsMm,
+  getObjectsInMarqueeSelectionMm,
   isPointNearFreehandStrokeMm,
+  MarqueeSelectionMode,
   ptToMm,
   resizeFreehandStrokeMm,
   resizeGroupObjectMm,
@@ -86,6 +88,7 @@ interface EditorCanvasProps {
   croppingImageId: string | null;
   editingTextId: string | null;
   onSelectObject: (id: string | null, additive?: boolean) => void;
+  onSelectObjects: (ids: string[]) => void;
   onSelectGuide: (guideId: string | null) => void;
   onSetCroppingImageId: (id: string | null) => void;
   onSetEditingTextId: (id: string | null) => void;
@@ -214,6 +217,18 @@ type InteractionState =
     }
   | {
       mode: 'erasing-freehand';
+    }
+  | {
+      mode: 'marquee-selecting';
+      startClientX: number;
+      startClientY: number;
+      currentClientX: number;
+      currentClientY: number;
+      startMmX: number;
+      startMmY: number;
+      currentMmX: number;
+      currentMmY: number;
+      hasCrossedThreshold: boolean;
     };
 
 export const EditorCanvas: React.FC<EditorCanvasProps> = ({
@@ -234,6 +249,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   croppingImageId,
   editingTextId,
   onSelectObject,
+  onSelectObjects,
   onSelectGuide,
   onSetCroppingImageId,
   onSetEditingTextId,
@@ -273,6 +289,10 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   const processPointerMoveRef = useRef<
     (clientX: number, clientY: number, shiftKey?: boolean) => void
   >(() => {});
+  const finishWorkspaceInteractionRef = useRef<() => void>(() => {});
+  const suppressContextMenuUntilRef = useRef<number>(0);
+  const cancelledMarqueeAwaitingReleaseRef = useRef<boolean>(false);
+  const marqueeInputSourceRef = useRef<'pointer' | 'mouse'>('pointer');
 
   // Synchronized refs so native touch event listeners always read fresh zoom & pan values
   const zoomRef = useRef(zoom);
@@ -336,6 +356,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     horizontalMm: number | null;
   }>({ verticalMm: null, horizontalMm: null });
 
+  const isMarqueeDragging =
+    interaction?.mode === 'marquee-selecting' && interaction.hasCrossedThreshold;
+
   // Base 100% scale factor (px per mm before CSS zoom transform)
   const basePxPerMm = CSS_PX_PER_MM_AT_100;
   // Effective screen px per mm at current zoom
@@ -391,6 +414,142 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       window.removeEventListener('keyup', handleKeyUp);
     };
   }, [isSpacePressed]);
+
+  // Cancel any pending marquee selection if the active tool switches away from Select
+  useEffect(() => {
+    if (activeTool !== 'select' && interactionRef.current?.mode === 'marquee-selecting') {
+      setInteraction(null);
+    }
+  }, [activeTool]);
+
+  // Suppress stray contextmenu events only immediately after a completed or Escape-cancelled right-drag selection
+  useEffect(() => {
+    const handleWindowContextMenuCapture = (e: MouseEvent) => {
+      const current = interactionRef.current;
+      if (current?.mode === 'marquee-selecting') {
+        if (current.hasCrossedThreshold) {
+          e.preventDefault();
+          e.stopPropagation();
+        } else {
+          // Normal right-click (< 5 px): allow menu and clear pending marquee state cleanly
+          setInteraction(null);
+        }
+        return;
+      }
+
+      if (
+        cancelledMarqueeAwaitingReleaseRef.current ||
+        performance.now() <= suppressContextMenuUntilRef.current
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        cancelledMarqueeAwaitingReleaseRef.current = false;
+        suppressContextMenuUntilRef.current = 0;
+      }
+    };
+
+    const handleCancelledReleaseUp = (e: MouseEvent) => {
+      if (e.button !== 2 || !cancelledMarqueeAwaitingReleaseRef.current) return;
+      cancelledMarqueeAwaitingReleaseRef.current = false;
+      suppressContextMenuUntilRef.current = performance.now() + 450;
+    };
+
+    window.addEventListener('contextmenu', handleWindowContextMenuCapture, true);
+    window.addEventListener('pointerup', handleCancelledReleaseUp, true);
+    window.addEventListener('mouseup', handleCancelledReleaseUp, true);
+    return () => {
+      window.removeEventListener('contextmenu', handleWindowContextMenuCapture, true);
+      window.removeEventListener('pointerup', handleCancelledReleaseUp, true);
+      window.removeEventListener('mouseup', handleCancelledReleaseUp, true);
+    };
+  }, []);
+
+  // Coherent window-level lifecycle while a right-button CAD marquee selection is active
+  const isMarqueeModeActive = interaction?.mode === 'marquee-selecting';
+  useEffect(() => {
+    if (!isMarqueeModeActive) return;
+
+    const handleWindowPointerMove = (e: PointerEvent) => {
+      if (interactionRef.current?.mode !== 'marquee-selecting') return;
+      if (e.pointerType && e.pointerType !== 'mouse' && e.pointerType !== 'pen') return;
+      marqueeInputSourceRef.current = 'pointer';
+      if ((e.buttons & 2) === 0) {
+        finishWorkspaceInteractionRef.current();
+        return;
+      }
+      processPointerMoveRef.current(e.clientX, e.clientY, e.shiftKey);
+    };
+
+    const handleWindowMouseMove = (e: MouseEvent) => {
+      if (interactionRef.current?.mode !== 'marquee-selecting') return;
+      if (marqueeInputSourceRef.current === 'pointer') return;
+      if ((e.buttons & 2) === 0) {
+        finishWorkspaceInteractionRef.current();
+        return;
+      }
+      processPointerMoveRef.current(e.clientX, e.clientY, e.shiftKey);
+    };
+
+    const handleRightButtonRelease = () => {
+      if (cancelledMarqueeAwaitingReleaseRef.current) {
+        cancelledMarqueeAwaitingReleaseRef.current = false;
+        suppressContextMenuUntilRef.current = performance.now() + 450;
+        return;
+      }
+      if (interactionRef.current?.mode === 'marquee-selecting') {
+        finishWorkspaceInteractionRef.current();
+      }
+    };
+
+    const handleWindowPointerUp = (e: PointerEvent) => {
+      if (e.button !== 2) return;
+      if (e.pointerType && e.pointerType !== 'mouse' && e.pointerType !== 'pen') return;
+      handleRightButtonRelease();
+    };
+
+    const handleWindowMouseUp = (e: MouseEvent) => {
+      if (e.button !== 2) return;
+      handleRightButtonRelease();
+    };
+
+    const cancelActiveMarquee = () => {
+      cancelledMarqueeAwaitingReleaseRef.current = false;
+      if (interactionRef.current?.mode === 'marquee-selecting') {
+        setInteraction(null);
+      }
+    };
+
+    const handleWindowKeyDownCapture = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const current = interactionRef.current;
+      if (current?.mode !== 'marquee-selecting') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (current.hasCrossedThreshold) {
+        cancelledMarqueeAwaitingReleaseRef.current = true;
+        suppressContextMenuUntilRef.current = performance.now() + 800;
+      }
+      setInteraction(null);
+    };
+
+    window.addEventListener('pointermove', handleWindowPointerMove);
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('pointerup', handleWindowPointerUp);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    window.addEventListener('pointercancel', cancelActiveMarquee);
+    window.addEventListener('blur', cancelActiveMarquee);
+    window.addEventListener('keydown', handleWindowKeyDownCapture, true);
+
+    return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove);
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      window.removeEventListener('pointercancel', cancelActiveMarquee);
+      window.removeEventListener('blur', cancelActiveMarquee);
+      window.removeEventListener('keydown', handleWindowKeyDownCapture, true);
+    };
+  }, [isMarqueeModeActive]);
 
   /**
    * Converts client (viewport) coordinates into canonical millimetre coordinates on the active page.
@@ -771,6 +930,60 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   };
 
   /**
+   * Starts a pending right-mouse-button CAD Window/Crossing marquee selection
+   * (only when the Select tool is active and not over rulers, sidebars, or text inputs).
+   */
+  const startRightButtonMarqueeSelection = (
+    clientX: number,
+    clientY: number,
+    target: EventTarget | null,
+    nativeEvent: Event,
+    source: 'pointer' | 'mouse'
+  ) => {
+    if (
+      activeTool !== 'select' ||
+      isSpacePressed ||
+      isTouchPinchingRef.current ||
+      isAdjustingGuideOrRulerRef.current ||
+      interactionRef.current !== null ||
+      isEventFromRulerOrSidebar(target, clientX, clientY, nativeEvent)
+    ) {
+      return;
+    }
+
+    const targetEl =
+      target instanceof Element
+        ? target
+        : target instanceof Node
+        ? target.parentElement
+        : null;
+    if (
+      targetEl &&
+      (targetEl.closest('input, textarea, select, [contenteditable="true"]') !== null)
+    ) {
+      return;
+    }
+
+    const ptMm = clientToPageMm(clientX, clientY);
+    marqueeInputSourceRef.current = source;
+    cancelledMarqueeAwaitingReleaseRef.current = false;
+    lastPointerClientRef.current = { clientX, clientY };
+
+    setInteraction({
+      mode: 'marquee-selecting',
+      startClientX: clientX,
+      startClientY: clientY,
+      currentClientX: clientX,
+      currentClientY: clientY,
+      startMmX: ptMm.x,
+      startMmY: ptMm.y,
+      currentMmX: ptMm.x,
+      currentMmY: ptMm.y,
+      hasCrossedThreshold: false,
+    });
+  };
+
+  /**
    * Capture-phase PointerDown on workspace:
    * Explicitly verifies the event target first so events originating from rulers,
    * guidelines, or sidebars are never added to canvas pan/pinch pointer tracking.
@@ -818,6 +1031,20 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     ) {
       return;
     }
+
+    if (e.pointerType === 'mouse' && e.button === 2) {
+      if (!e.ctrlKey) {
+        startRightButtonMarqueeSelection(
+          e.clientX,
+          e.clientY,
+          e.target,
+          e.nativeEvent,
+          'pointer'
+        );
+      }
+      return;
+    }
+
     if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1) return;
 
     activePointersRef.current.set(e.pointerId, {
@@ -859,6 +1086,18 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       isAdjustingGuideOrRulerRef.current ||
       interactionRef.current !== null
     ) {
+      return;
+    }
+    if (e.button === 2) {
+      if (!e.ctrlKey) {
+        startRightButtonMarqueeSelection(
+          e.clientX,
+          e.clientY,
+          e.target,
+          e.nativeEvent,
+          'mouse'
+        );
+      }
       return;
     }
     if (e.button !== 0 && e.button !== 1) return;
@@ -1137,6 +1376,24 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
 
     const currentInteraction = interactionRef.current ?? interaction;
     if (!currentInteraction) return;
+
+    if (currentInteraction.mode === 'marquee-selecting') {
+      const distPx = Math.hypot(
+        clientX - currentInteraction.startClientX,
+        clientY - currentInteraction.startClientY
+      );
+      const hasCrossedThreshold =
+        currentInteraction.hasCrossedThreshold || distPx >= 5;
+      setInteraction({
+        ...currentInteraction,
+        currentClientX: clientX,
+        currentClientY: clientY,
+        currentMmX: ptMm.x,
+        currentMmY: ptMm.y,
+        hasCrossedThreshold,
+      });
+      return;
+    }
 
     if (currentInteraction.mode === 'panning') {
       // Never allow document panning if a ruler or guideline interaction is active
@@ -1740,6 +1997,10 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       return;
     }
 
+    if (interactionRef.current?.mode === 'marquee-selecting') {
+      return;
+    }
+
     processPointerMove(e.clientX, e.clientY, e.shiftKey);
   };
 
@@ -1755,6 +2016,10 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
 
     if (activePointersRef.current.size < 2) {
       isTouchPinchingRef.current = false;
+    }
+
+    if (interactionRef.current?.mode === 'marquee-selecting') {
+      return;
     }
 
     if (interactionRef.current?.mode === 'pinch-zoom' && activePointersRef.current.size === 1) {
@@ -1793,7 +2058,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     }
     if (
       interactionRef.current?.mode === 'drawing-freehand' ||
-      interactionRef.current?.mode === 'erasing-freehand'
+      interactionRef.current?.mode === 'erasing-freehand' ||
+      interactionRef.current?.mode === 'marquee-selecting'
     ) {
       setInteraction(null);
       return;
@@ -1804,6 +2070,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
   };
 
   const handleWorkspaceMouseMove = (e: React.MouseEvent) => {
+    if (interactionRef.current?.mode === 'marquee-selecting') {
+      return;
+    }
     processPointerMove(e.clientX, e.clientY, e.shiftKey);
   };
 
@@ -1944,8 +2213,37 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
     isAdjustingGuideOrRulerRef.current = false;
     setActiveSnapLines({ verticalMm: null, horizontalMm: null });
 
-    const currentInteraction = interactionRef.current ?? interaction;
+    const currentInteraction = interactionRef.current;
     if (!currentInteraction) return;
+
+    if (currentInteraction.mode === 'marquee-selecting') {
+      const {
+        startMmX,
+        startMmY,
+        currentMmX,
+        currentMmY,
+        hasCrossedThreshold,
+      } = currentInteraction;
+      setInteraction(null);
+      if (!hasCrossedThreshold) {
+        return;
+      }
+      suppressContextMenuUntilRef.current = performance.now() + 450;
+      const selectionMode: MarqueeSelectionMode =
+        currentMmX < startMmX ? 'crossing' : 'window';
+      const matchedIds = getObjectsInMarqueeSelectionMm(
+        page.objects,
+        {
+          minX: Math.min(startMmX, currentMmX),
+          minY: Math.min(startMmY, currentMmY),
+          maxX: Math.max(startMmX, currentMmX),
+          maxY: Math.max(startMmY, currentMmY),
+        },
+        selectionMode
+      );
+      onSelectObjects(matchedIds);
+      return;
+    }
 
     if (currentInteraction.mode === 'panning') {
       if (currentInteraction.clearSelectionOnTap && currentInteraction.movedDistancePx <= 4) {
@@ -2216,6 +2514,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
 
     setInteraction(null);
   };
+  finishWorkspaceInteractionRef.current = finishWorkspaceInteraction;
 
   const handleWheel = (e: React.WheelEvent) => {
     // When Ctrl is pressed (including Ctrl + Wheel and Ctrl + Shift + Wheel),
@@ -2400,7 +2699,13 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                 );
               }}
               className={`absolute select-none ${
-                activeTool === 'select' ? 'cursor-move' : 'pointer-events-none'
+                activeTool === 'select'
+                  ? isMarqueeDragging
+                    ? 'cursor-crosshair'
+                    : isSelected && !obj.locked
+                    ? 'cursor-move'
+                    : 'cursor-default'
+                  : 'pointer-events-none'
               }`}
               style={{
                 left: leftPx,
@@ -2444,6 +2749,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   {!obj.locked && (
                     <div
                       onPointerDown={(e) => {
+                        if (e.pointerType === 'mouse' && e.button !== 0) return;
                         e.stopPropagation();
                         setInteraction({
                           mode: 'rotating-object',
@@ -2454,6 +2760,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                         });
                       }}
                       onMouseDown={(e) => {
+                        if (e.button !== 0) return;
                         e.stopPropagation();
                         if (interactionRef.current !== null) return;
                         setInteraction({
@@ -2476,7 +2783,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                           initialObject: obj,
                         });
                       }}
-                      className="absolute left-1/2 bg-white rounded-full cursor-rotate-handle pointer-events-auto shadow-sm"
+                      className={`absolute left-1/2 bg-white rounded-full pointer-events-auto shadow-sm ${
+                        isMarqueeDragging ? 'cursor-crosshair' : 'cursor-rotate-handle'
+                      }`}
                       style={{
                         top: -22 * invZoom,
                         marginLeft: -halfHandlePagePx,
@@ -2518,10 +2827,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                         <div
                           key={h.id}
                           onPointerDown={(e) => {
+                            if (e.pointerType === 'mouse' && e.button !== 0) return;
                             e.stopPropagation();
                             startGroupResize(e.clientX, e.clientY);
                           }}
                           onMouseDown={(e) => {
+                            if (e.button !== 0) return;
                             e.stopPropagation();
                             if (interactionRef.current !== null) return;
                             startGroupResize(e.clientX, e.clientY);
@@ -2535,7 +2846,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                               e.touches[0].clientY
                             );
                           }}
-                          className={`absolute pointer-events-auto shadow-sm ${h.cursor}`}
+                          className={`absolute pointer-events-auto shadow-sm ${
+                            isMarqueeDragging ? 'cursor-crosshair' : h.cursor
+                          }`}
                           style={{
                             left: h.x * widthPx - halfHandlePagePx,
                             top: h.y * heightPx - halfHandlePagePx,
@@ -2630,7 +2943,17 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                 y2={y2Px}
                 stroke="transparent"
                 strokeWidth={Math.max(24 * invZoom, strokePx + 14 * invZoom)}
-                className="pointer-events-auto cursor-move"
+                className={
+                  activeTool === 'select'
+                    ? `pointer-events-auto ${
+                        isMarqueeDragging
+                          ? 'cursor-crosshair'
+                          : isSelected && !obj.locked
+                          ? 'cursor-move'
+                          : 'cursor-default'
+                      }`
+                    : 'pointer-events-none'
+                }
                 onContextMenu={(e) => {
                   if (e.ctrlKey || e.metaKey) {
                     e.preventDefault();
@@ -2770,6 +3093,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
             <>
               <div
                 onPointerDown={(e) => {
+                  if (e.pointerType === 'mouse' && e.button !== 0) return;
                   e.stopPropagation();
                   isShiftPressedRef.current = e.shiftKey;
                   const initLen = formatMm(
@@ -2798,6 +3122,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   });
                 }}
                 onMouseDown={(e) => {
+                  if (e.button !== 0) return;
                   e.stopPropagation();
                   if (interactionRef.current !== null) return;
                   isShiftPressedRef.current = e.shiftKey;
@@ -2867,6 +3192,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
               />
               <div
                 onPointerDown={(e) => {
+                  if (e.pointerType === 'mouse' && e.button !== 0) return;
                   e.stopPropagation();
                   isShiftPressedRef.current = e.shiftKey;
                   const initLen = formatMm(
@@ -2895,6 +3221,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   });
                 }}
                 onMouseDown={(e) => {
+                  if (e.button !== 0) return;
                   e.stopPropagation();
                   if (interactionRef.current !== null) return;
                   isShiftPressedRef.current = e.shiftKey;
@@ -3020,7 +3347,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                 className={
                   activeTool === 'eraser'
                     ? 'pointer-events-auto cursor-pointer'
-                    : 'pointer-events-auto cursor-move'
+                    : isMarqueeDragging
+                    ? 'pointer-events-auto cursor-crosshair'
+                    : isSelected && !obj.locked
+                    ? 'pointer-events-auto cursor-move'
+                    : 'pointer-events-auto cursor-default'
                 }
                 onPointerDown={(e) => {
                   const isMacCtrlClick =
@@ -3123,6 +3454,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
               {!obj.locked && (
                 <div
                   onPointerDown={(e) => {
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
                     e.stopPropagation();
                     setInteraction({
                       mode: 'rotating-object',
@@ -3133,6 +3465,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   onMouseDown={(e) => {
+                    if (e.button !== 0) return;
                     e.stopPropagation();
                     if (interactionRef.current !== null) return;
                     setInteraction({
@@ -3155,7 +3488,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                       initialObject: obj,
                     });
                   }}
-                  className="absolute left-1/2 bg-white rounded-full cursor-rotate-handle pointer-events-auto shadow-sm"
+                  className={`absolute left-1/2 bg-white rounded-full pointer-events-auto shadow-sm ${
+                    isMarqueeDragging ? 'cursor-crosshair' : 'cursor-rotate-handle'
+                  }`}
                   style={{
                     top: -24 * invZoom,
                     marginLeft: -halfHandlePagePx,
@@ -3196,10 +3531,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     <div
                       key={h.id}
                       onPointerDown={(e) => {
+                        if (e.pointerType === 'mouse' && e.button !== 0) return;
                         e.stopPropagation();
                         startStrokeResize(e.clientX, e.clientY);
                       }}
                       onMouseDown={(e) => {
+                        if (e.button !== 0) return;
                         e.stopPropagation();
                         if (interactionRef.current !== null) return;
                         startStrokeResize(e.clientX, e.clientY);
@@ -3213,7 +3550,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                           e.touches[0].clientY
                         );
                       }}
-                      className={`absolute pointer-events-auto shadow-sm ${h.cursor}`}
+                      className={`absolute pointer-events-auto shadow-sm ${
+                        isMarqueeDragging ? 'cursor-crosshair' : h.cursor
+                      }`}
                       style={{
                         left: h.x * widthPx - halfHandlePagePx,
                         top: h.y * heightPx - halfHandlePagePx,
@@ -3314,7 +3653,13 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
           }
         }}
         className={`absolute select-none ${
-          !isInsideGroup && activeTool === 'select' ? 'cursor-move' : 'pointer-events-none'
+          !isInsideGroup && activeTool === 'select'
+            ? isMarqueeDragging
+              ? 'cursor-crosshair'
+              : isSelected && !obj.locked
+              ? 'cursor-move'
+              : 'cursor-default'
+            : 'pointer-events-none'
         }`}
         style={{
           left: leftPx,
@@ -3579,6 +3924,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
             {!isCropping && !obj.locked && (
               <div
                 onPointerDown={(e) => {
+                  if (e.pointerType === 'mouse' && e.button !== 0) return;
                   e.stopPropagation();
                   setInteraction({
                     mode: 'rotating-object',
@@ -3589,6 +3935,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   });
                 }}
                 onMouseDown={(e) => {
+                  if (e.button !== 0) return;
                   e.stopPropagation();
                   if (interactionRef.current !== null) return;
                   setInteraction({
@@ -3611,7 +3958,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     initialObject: obj,
                   });
                 }}
-                className="absolute left-1/2 bg-white rounded-full cursor-rotate-handle pointer-events-auto shadow-sm"
+                className={`absolute left-1/2 bg-white rounded-full pointer-events-auto shadow-sm ${
+                  isMarqueeDragging ? 'cursor-crosshair' : 'cursor-rotate-handle'
+                }`}
                 style={{
                   top: -24 * invZoom,
                   marginLeft: -halfHandlePagePx,
@@ -3664,10 +4013,12 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                   <div
                     key={h.id}
                     onPointerDown={(e) => {
+                      if (e.pointerType === 'mouse' && e.button !== 0) return;
                       e.stopPropagation();
                       startHandleDrag(e.clientX, e.clientY);
                     }}
                     onMouseDown={(e) => {
+                      if (e.button !== 0) return;
                       e.stopPropagation();
                       if (interactionRef.current !== null) return;
                       startHandleDrag(e.clientX, e.clientY);
@@ -3678,7 +4029,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                       if (interactionRef.current !== null) return;
                       startHandleDrag(e.touches[0].clientX, e.touches[0].clientY);
                     }}
-                    className={`absolute pointer-events-auto shadow-sm ${h.cursor}`}
+                    className={`absolute pointer-events-auto shadow-sm ${
+                      isMarqueeDragging ? 'cursor-crosshair' : h.cursor
+                    }`}
                     style={{
                       left: h.x * widthPx - halfHandlePagePx,
                       top: h.y * heightPx - halfHandlePagePx,
@@ -3709,7 +4062,10 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       onPointerCancel={handleWorkspacePointerCancel}
       onMouseDown={handleWorkspaceMouseDown}
       onMouseMove={handleWorkspaceMouseMove}
-      onMouseUp={finishWorkspaceInteraction}
+      onMouseUp={() => {
+        if (interactionRef.current?.mode === 'marquee-selecting') return;
+        finishWorkspaceInteraction();
+      }}
       onMouseLeave={() => {
         onCursorMoveMm(null);
       }}
@@ -3755,6 +4111,8 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       className={`workspace-canvas relative flex-1 bg-slate-200/85 overflow-hidden overscroll-none touch-none select-none ${
         interaction?.mode === 'rotating-object'
           ? 'cursor-rotate-handle'
+          : isMarqueeDragging
+          ? 'cursor-crosshair'
           : isSpacePressed || activeTool === 'pan' || interaction?.mode === 'panning'
           ? 'cursor-grab active:cursor-grabbing'
           : activeTool === 'eraser'
@@ -4145,6 +4503,51 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
             );
           })()}
 
+          {/* CAD Window (Left-to-Right Solid Blue) / Crossing (Right-to-Left Dashed Green) Selection Preview */}
+          {interaction?.mode === 'marquee-selecting' &&
+            interaction.hasCrossedThreshold &&
+            (() => {
+              const minMmX = Math.min(interaction.startMmX, interaction.currentMmX);
+              const maxMmX = Math.max(interaction.startMmX, interaction.currentMmX);
+              const minMmY = Math.min(interaction.startMmY, interaction.currentMmY);
+              const maxMmY = Math.max(interaction.startMmY, interaction.currentMmY);
+              const isCrossing = interaction.currentMmX < interaction.startMmX;
+              const leftPx = minMmX * basePxPerMm;
+              const topPx = minMmY * basePxPerMm;
+              const widthPx = Math.max(1 * invZoom, (maxMmX - minMmX) * basePxPerMm);
+              const heightPx = Math.max(1 * invZoom, (maxMmY - minMmY) * basePxPerMm);
+              const strokePx = 1.5 * invZoom;
+
+              return (
+                <svg
+                  className="absolute overflow-visible pointer-events-none z-50"
+                  style={{
+                    left: leftPx,
+                    top: topPx,
+                    width: widthPx,
+                    height: heightPx,
+                  }}
+                >
+                  <rect
+                    x={0}
+                    y={0}
+                    width={widthPx}
+                    height={heightPx}
+                    fill={
+                      isCrossing
+                        ? 'rgba(22, 163, 74, 0.11)'
+                        : 'rgba(37, 99, 235, 0.11)'
+                    }
+                    stroke={isCrossing ? '#16A34A' : '#2563EB'}
+                    strokeWidth={strokePx}
+                    strokeDasharray={
+                      isCrossing ? `${6 * invZoom} ${4 * invZoom}` : undefined
+                    }
+                  />
+                </svg>
+              );
+            })()}
+
           {/* Magnetic Snap Alignment Indicator Lines */}
           {activeSnapLines.verticalMm !== null && (
             <div
@@ -4243,7 +4646,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   className={`absolute top-0 bottom-0 z-30 group flex justify-center touch-none ${
-                    doc.lockGuides ? 'cursor-pointer' : 'cursor-ew-resize'
+                    isMarqueeDragging
+                      ? 'cursor-crosshair'
+                      : doc.lockGuides
+                      ? 'cursor-pointer'
+                      : 'cursor-ew-resize'
                   }`}
                   style={{
                     left: posPx - hitThickness / 2,
@@ -4336,7 +4743,11 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     });
                   }}
                   className={`absolute left-0 right-0 z-30 group flex items-center touch-none ${
-                    doc.lockGuides ? 'cursor-pointer' : 'cursor-ns-resize'
+                    isMarqueeDragging
+                      ? 'cursor-crosshair'
+                      : doc.lockGuides
+                      ? 'cursor-pointer'
+                      : 'cursor-ns-resize'
                   }`}
                   style={{
                     top: posPx - hitThickness / 2,

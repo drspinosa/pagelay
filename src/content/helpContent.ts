@@ -312,8 +312,8 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
           'toolbar arrows',
         ],
         bullets: [
-          'Select: Click any object to select, move, resize or rotate it. Drag on empty page space to draw a selection marquee around multiple objects.',
-          'Slide / Pan: Drag anywhere on the canvas with mouse or finger to move around the page without moving objects. You can also hold Spacebar + Drag on a keyboard at any time.',
+          'Select: Click any object to select, move, resize or rotate it. Right-drag across the canvas to draw a CAD-style Window (left-to-right, solid blue) or Crossing (right-to-left, dashed green) selection rectangle over multiple objects.',
+          'Slide / Pan: Left-drag on empty canvas space (or choose Slide / Pan, or hold Spacebar + Drag at any time) to move around the page without moving objects.',
           'Desktop Ribbon Scrolling: On narrower laptop or desktop windows where the drawing-tools ribbon overflows, use the left/right arrow buttons at the ends of the ribbon or roll your mouse wheel over the ribbon to scroll horizontally.',
           'Mobile Ribbon Swiping: On phones and tablets, swipe left or right across the drawing-tools strip with your finger.',
         ],
@@ -604,13 +604,18 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
       {
         id: 'selecting-grouping-and-locking',
         sectionId: 'images-and-objects',
-        title: 'Multi-Selection, Copy & Paste, Grouping and Locking Objects',
+        title: 'Multi-Selection, Cut, Copy & Paste, Grouping and Locking Objects',
         summary:
-          'Select multiple objects, copy and paste across pages or documents, combine objects into groups, or lock them in place.',
+          'Select multiple objects, cut or copy and paste across pages or documents, combine objects into groups, or lock them in place.',
         keywords: [
           'select multiple',
           'multi-select',
           'marquee',
+          'window selection',
+          'crossing selection',
+          'right drag',
+          'autocad',
+          'cut',
           'copy',
           'paste',
           'clipboard',
@@ -620,14 +625,19 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
           'lock',
           'unlock',
           'ctrl click',
+          'ctrl x',
+          'cmd x',
         ],
         bullets: [
-          'Multi-Select on Canvas: With the Select tool active, drag a selection box across multiple objects, or hold Ctrl (Windows/Linux), Command ⌘ (Mac) or Shift while clicking objects.',
+          'CAD Window & Crossing Selection (Right-Mouse Drag): With the Select tool active, press and drag the right mouse button from empty canvas or over existing objects (press Escape to cancel a drag; normal right-clicks without dragging still open the context menu):',
+          'Window Selection (Left-to-Right): Displays a solid blue rectangle and selects only objects completely enclosed inside it.',
+          'Crossing Selection (Right-to-Left): Displays a dashed green rectangle and selects objects that are either enclosed by or intersected by the rectangle.',
+          'Click Multi-Select on Canvas: Hold Ctrl (Windows/Linux), Command ⌘ (Mac) or Shift while clicking objects to add or toggle them individually.',
           'Multi-Select in Properties: When no object (or multiple objects) are selected, use the Page Objects checklist in the Properties panel to tick or untick objects.',
-          'Copy & Paste Objects (Ctrl/Cmd + C, Ctrl/Cmd + V): Copy any single object, multi-selection or group and paste onto the same page, another page, or even another document opened in the same session. Relative positions, properties, grouping and original image assets are preserved automatically, and pasting multiple objects records a single Undo step.',
+          'Cut, Copy & Paste Objects (Ctrl/Cmd + X, Ctrl/Cmd + C, Ctrl/Cmd + V): Cut or copy any single object, multi-selection or group and paste onto the same page, another page, or another document opened in the same session. Relative positions, properties, grouping and original image assets are preserved automatically, and cutting or pasting records a single Undo step. Selections containing locked objects must be unlocked first (Ctrl/Cmd + L) before cutting.',
           'Group Objects (Ctrl/Cmd + G): With 2 or more objects selected, click Group Objects in the floating canvas badge or Properties panel. Moving, resizing, rotating or aligning a group transforms all member objects together in millimetres.',
           'Ungroup (Ctrl/Cmd + Shift + G): Select a group and click Ungroup to restore the individual objects at their current positions.',
-          'Lock / Unlock (Ctrl/Cmd + L): Lock any object or selection in the Properties panel so it cannot be accidentally moved, resized or deleted until unlocked.',
+          'Lock / Unlock (Ctrl/Cmd + L): Lock any object or selection in the Properties panel so it cannot be accidentally moved, resized, cut or deleted until unlocked.',
         ],
       },
       {
@@ -947,6 +957,15 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
             action: 'Pan / slide the workspace temporarily',
           },
           {
+            keys: 'Right-Drag Left-to-Right (Select tool)',
+            action: 'Window Selection (solid blue) — selects objects completely enclosed',
+          },
+          {
+            keys: 'Right-Drag Right-to-Left (Select tool)',
+            action:
+              'Crossing Selection (dashed green) — selects enclosed or intersecting objects',
+          },
+          {
             keys: 'Ctrl / ⌘ + Click (or Shift + Click)',
             action: 'Add or toggle objects in a multi-selection on the canvas',
           },
@@ -987,13 +1006,17 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
             action: 'Lock or unlock selected object(s)',
           },
           {
+            keys: 'Ctrl / ⌘ + X',
+            action: 'Cut selected unlocked object(s) or group to the clipboard',
+          },
+          {
             keys: 'Ctrl / ⌘ + C',
             action: 'Copy selected object(s) or group',
           },
           {
             keys: 'Ctrl / ⌘ + V',
             action:
-              'Paste clipboard image from another app, or paste copied PageLay object(s)',
+              'Paste clipboard image from another app, or paste cut/copied PageLay object(s)',
           },
           { keys: 'Ctrl / ⌘ + D', action: 'Duplicate selected object' },
           {

@@ -1296,6 +1296,23 @@ export default function App() {
   ]);
 
   /**
+   * Dedicated bulk-selection callback used by CAD Window/Crossing marquee selection.
+   * Updates selectedObjectIds/selectedObjectId together, clears stale active states,
+   * and never marks the document dirty or creates an Undo entry.
+   */
+  const handleBulkSelectObjects = useCallback((ids: string[]) => {
+    const validIdSet = new Set(
+      (docRef.current.pages[activePageIndexRef.current]?.objects ?? []).map((o) => o.id)
+    );
+    const nextIds = Array.from(new Set(ids)).filter((id) => validIdSet.has(id));
+    setSelectedGuideId(null);
+    setCroppingImageId(null);
+    setEditingTextId(null);
+    setSelectedObjectIds(nextIds);
+    setSelectedObjectId(nextIds[nextIds.length - 1] ?? null);
+  }, []);
+
+  /**
    * Duplicates an object on the active page.
    */
   const handleDuplicateObject = useCallback(
@@ -1765,8 +1782,9 @@ export default function App() {
         return;
       }
 
-      // Paste (Ctrl/Cmd + V) is handled by the native window `paste` listener below
-      // so real system clipboard images always take priority over older internal copies.
+      // Cut (Ctrl/Cmd + X) and Paste (Ctrl/Cmd + V) are handled by the native window
+      // `cut` and `paste` listeners below so editable text fields preserve native behaviour
+      // and real system clipboard images always take priority over older internal copies.
 
       // Escape: cancel active text editing/cropping, reset tool to Select, or deselect active selection
       if (e.key === 'Escape') {
@@ -2625,10 +2643,10 @@ export default function App() {
     [pushHistory, markDirty, requestDocumentReplacement, showToast]
   );
 
-  // Native clipboard Copy / Paste listeners:
+  // Native clipboard Copy / Cut / Paste listeners:
   // - System clipboard images (Snipping Tool, screenshots, Word, PowerPoint, browsers) take priority over internal copies.
-  // - Supports single & multi-object/group internal PageLay copy/paste with preserved assets across pages and documents.
-  // - Never intercepts normal copy/paste when typing inside inputs, text boxes, Help search, or modal fields.
+  // - Supports single & multi-object/group internal PageLay copy/cut/paste with preserved assets across pages and documents.
+  // - Never intercepts normal copy/cut/paste when typing inside inputs, text boxes, Help search, or modal fields.
   useEffect(() => {
     const isModalBlockingClipboard = () =>
       isRecoveryModalOpen ||
@@ -2653,6 +2671,30 @@ export default function App() {
     const hasUserDomTextSelection = (): boolean => {
       const sel = window.getSelection?.();
       return Boolean(sel && !sel.isCollapsed && sel.toString().length > 0);
+    };
+
+    const writePageLayPayloadToClipboardEvent = (
+      e: ClipboardEvent,
+      payload: PageLayClipboardPayload
+    ): boolean => {
+      if (!e.clipboardData) {
+        payload.wroteToSystemClipboard = false;
+        return false;
+      }
+      try {
+        e.preventDefault();
+        e.clipboardData.setData('application/x-pagelay-clip', payload.clipId);
+        e.clipboardData.setData(
+          'text/html',
+          `<span data-pagelay-clip="${payload.clipId}"></span>`
+        );
+        e.clipboardData.setData('text/plain', payload.plainTextSummary);
+        payload.wroteToSystemClipboard = true;
+        return true;
+      } catch {
+        payload.wroteToSystemClipboard = false;
+        return false;
+      }
     };
 
     const onCopy = (e: ClipboardEvent) => {
@@ -2688,21 +2730,7 @@ export default function App() {
           : createPageLayClipboardPayload(targets, curDoc.assets, curPage.id);
 
       clipboardPayloadRef.current = payload;
-
-      if (e.clipboardData) {
-        try {
-          e.preventDefault();
-          e.clipboardData.setData('application/x-pagelay-clip', payload.clipId);
-          e.clipboardData.setData(
-            'text/html',
-            `<span data-pagelay-clip="${payload.clipId}"></span>`
-          );
-          e.clipboardData.setData('text/plain', payload.plainTextSummary);
-          payload.wroteToSystemClipboard = true;
-        } catch {
-          payload.wroteToSystemClipboard = false;
-        }
-      }
+      writePageLayPayloadToClipboardEvent(e, payload);
 
       if (!justCopiedViaKeydown) {
         showToast(
@@ -2711,6 +2739,96 @@ export default function App() {
             : `Copied ${targets.length} objects`
         );
       }
+    };
+
+    const onCut = (e: ClipboardEvent) => {
+      if (isModalBlockingClipboard()) return;
+      const targetEl = e.target as HTMLElement | null;
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (isEditableElement(targetEl) || isEditableElement(activeEl)) return;
+      if (editingTextId) return;
+      if (hasUserDomTextSelection()) return;
+
+      const curDoc = docRef.current;
+      const targetIdx = curDoc.pages[activePageIndexRef.current]
+        ? activePageIndexRef.current
+        : 0;
+      const curPage = curDoc.pages[targetIdx];
+      if (!curPage) return;
+
+      const idSet = new Set(
+        selectedObjectIds.length > 0
+          ? selectedObjectIds
+          : selectedObjectId
+          ? [selectedObjectId]
+          : []
+      );
+      if (idSet.size === 0) return;
+
+      const targets = curPage.objects.filter((o) => idSet.has(o.id));
+      if (targets.length === 0) return;
+
+      if (targets.some((o) => o.locked)) {
+        e.preventDefault();
+        showToast(
+          targets.length === 1
+            ? `"${targets[0].name}" is locked. Unlock it first (Ctrl+L) to cut.`
+            : 'Selection includes locked objects. Unlock them first (Ctrl+L) to cut.',
+          'info'
+        );
+        return;
+      }
+
+      let payload: PageLayClipboardPayload;
+      try {
+        payload = createPageLayClipboardPayload(
+          targets,
+          curDoc.assets,
+          curPage.id
+        );
+        if (!writePageLayPayloadToClipboardEvent(e, payload)) {
+          showToast(
+            'Could not write cut selection to the clipboard. Nothing was removed.',
+            'info'
+          );
+          return;
+        }
+      } catch {
+        showToast(
+          'Could not write cut selection to the clipboard. Nothing was removed.',
+          'info'
+        );
+        return;
+      }
+
+      clipboardPayloadRef.current = payload;
+
+      const cutIdSet = new Set(targets.map((o) => o.id));
+      pushHistory(curDoc);
+      const nextDoc: PageLayDocument = {
+        ...curDoc,
+        pages: curDoc.pages.map((p, idx) =>
+          idx === targetIdx
+            ? { ...p, objects: p.objects.filter((o) => !cutIdSet.has(o.id)) }
+            : p
+        ),
+        updatedAt: new Date().toISOString(),
+      };
+      docRef.current = nextDoc;
+      setDoc(nextDoc);
+
+      setSelectedObjectIds([]);
+      setSelectedObjectId(null);
+      setSelectedGuideId(null);
+      setCroppingImageId((prev) => (prev && cutIdSet.has(prev) ? null : prev));
+      setEditingTextId((prev) => (prev && cutIdSet.has(prev) ? null : prev));
+      markDirty();
+
+      showToast(
+        targets.length === 1
+          ? `Cut "${targets[0].name}"`
+          : `Cut ${targets.length} objects`
+      );
     };
 
     const onPaste = (e: ClipboardEvent) => {
@@ -2787,14 +2905,17 @@ export default function App() {
     };
 
     window.addEventListener('copy', onCopy);
+    window.addEventListener('cut', onCut);
     window.addEventListener('paste', onPaste);
     return () => {
       window.removeEventListener('copy', onCopy);
+      window.removeEventListener('cut', onCut);
       window.removeEventListener('paste', onPaste);
     };
   }, [
     selectedObjectId,
     selectedObjectIds,
+    editingTextId,
     isRecoveryModalOpen,
     isNewModalOpen,
     isSaveAsModalOpen,
@@ -3130,6 +3251,7 @@ export default function App() {
             if (id !== croppingImageId) setCroppingImageId(null);
             if (id !== editingTextId) setEditingTextId(null);
           }}
+          onSelectObjects={handleBulkSelectObjects}
           onSelectGuide={(guideId) => setSelectedGuideId(guideId)}
           onSetCroppingImageId={setCroppingImageId}
           onSetEditingTextId={setEditingTextId}

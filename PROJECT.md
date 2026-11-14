@@ -553,6 +553,36 @@
   - **3. Curved Rotation-Arrow Handle Cursor (`src/index.css`, `src/components/EditorCanvas.tsx`)**:
     - Added `.cursor-rotate-handle` custom high-contrast SVG curved rotation-arrow cursor (`24×24`, hotspot `12 12`, `, pointer` fallback) and applied it to all rotation handles (objects, groups, freehand strokes) and during active `rotating-object` drags, replacing the generic grab hand while retaining `cursor-move`, all 8 resize cursors, handle geometry, and `Shift` / Precision angle snapping unchanged.
 
+### Milestone 35 — CAD-Style Window and Crossing Selection
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — CAD-Style Window and Crossing Selection"*
+- **Engineering Changes**:
+  - **1. Right-Button Window & Crossing Marquee Interaction (`src/components/EditorCanvas.tsx`)**:
+    - Added right-mouse-button rectangular multi-selection active strictly when the `Select` tool is active, starting over empty canvas or existing objects/handles with a `5 px` drag threshold so normal right-click context menus (`< 5 px`) are preserved untouched.
+    - **Left-to-right drag** triggers **Window Selection** (solid blue outline `#2563EB` with translucent blue fill), selecting only completely enclosed objects; **right-to-left drag** triggers **Crossing Selection** (dashed green outline `#16A34A` with translucent green fill), selecting enclosed or intersecting objects regardless of vertical drag direction.
+    - Coordinated `pointerdown`/`mousedown` and window-level `pointermove`/`pointerup`/`mouseup`/`pointercancel`/`blur`/`Escape`/capture `contextmenu` handling as a single non-duplicating interaction, suppressing context menus after drag completion or `Escape` cancellation while preserving left-button move/pan, middle-button pan, Spacebar pan, macOS `Ctrl-click`, and mobile touch gestures.
+  - **2. Exact Shape & Rotation Selection Geometry (`src/utils/units.ts`)**:
+    - Implemented `getObjectsInMarqueeSelectionMm`, `isObjectWindowSelectedMm`, and `isObjectCrossingSelectedMm` using exact rotated corner polygons (`image`, `text`, `rectangle`, `square`, `highlight`), rotated triangle vertices (`triangle`), rotated unit-circle ellipse intersection (`ellipse`, `circle`), segment-vs-rect intersection for `line`/`arrow`/`dimension` (including witness ticks), rotated freehand polyline segment tests (`freehand`), and recursive child checks for `group` entities treated as single selectable objects while excluding guidelines and handles.
+  - **3. Bulk Selection State & Cursor Refinement (`src/App.tsx`, `src/components/EditorCanvas.tsx`)**:
+    - Added `handleBulkSelectObjects` -> `onSelectObjects` updating `selectedObjectIds` and `selectedObjectId` together cleanly without marking the document dirty or adding Undo history.
+    - Refined workspace cursors so empty canvas and unselected/locked objects show the normal selection arrow (`cursor-default`), selected movable object bodies show `cursor-move`, rotation handles preserve `.cursor-rotate-handle`, resize handles preserve resize cursors, and active rectangular selection displays `cursor-crosshair`.
+
+
+### Milestone 36 — Native Cut (`Ctrl+X` / `Cmd+X`)
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Add Cut (Ctrl+X / Cmd+X)"*
+- **Engineering Changes**:
+  - **1. Native Browser `cut` Integration (`src/App.tsx`)**:
+    - Added a native `window` `cut` listener alongside `copy` and `paste` using shared `writePageLayPayloadToClipboardEvent` and `createPageLayClipboardPayload` helpers without blocking `Ctrl/⌘ + X` in `keydown`, avoiding duplicate processing or browser clipboard permission prompts.
+    - Builds a deep internal clipboard snapshot (preserving object properties, groups, relative positions, and isolated `Uint8Array` image asset bytes) and writes PageLay's `application/x-pagelay-clip`, `<span data-pagelay-clip="...">`, and `text/plain` summary markers to `e.clipboardData` before modifying the page.
+    - Removes selected objects in **one Undo operation** (`pushHistory`), clears active selection/crop/edit state, and calls `markDirty()` for Save and IndexedDB recovery only after clipboard preparation and writing succeed; aborts safely with a non-destructive toast if clipboard writing is unavailable.
+  - **2. Locked Object & Text Editing Safeguards (`src/App.tsx`)**:
+    - Enforces locked-object protection: if any selected object is locked, Cut aborts without removing objects or overwriting the clipboard and notifies the user to unlock first (`Ctrl/⌘ + L`).
+    - Strictly bypasses Cut handling inside `<input>`, `<textarea>`, `<select>`, `[contenteditable="true"]`, active inline text-box editing (`editingTextId`), active modals, or non-collapsed DOM text selections so native text cutting works untouched.
+  - **3. Cross-Page & Cross-Document Pasting**:
+    - Preserves cut assets and objects across the same page, other pages, and newly created/opened documents within the same PageLay session using the existing `prepareInternalPasteFromPayload` placement and offset workflow.
 
 ## 3. Keyboard & Mouse Shortcuts Reference
 
@@ -562,6 +592,8 @@
 | `Alt + Wheel` | Pan canvas horizontally |
 | `Shift + Wheel` | Zoom canvas in / out centred around the mouse pointer |
 | `Ctrl + Wheel` | Native browser tab / page zoom (not intercepted by PageLay) |
+| `Right-Drag` (Left-to-Right, Select tool) | CAD Window Selection (solid blue) — selects objects completely enclosed |
+| `Right-Drag` (Right-to-Left, Select tool) | CAD Crossing Selection (dashed green) — selects enclosed or intersecting objects |
 | `Ctrl + Click` / `⌘ + Click` (or `Shift + Click`) | Add or toggle multiple objects in selection on the canvas |
 | `Shift + Rotate` | Constrain object/group rotation to configured angle increment (`1°`–`45°`, default `15°`) |
 | `Shift + Drag` (Line / Arrow / Dimension) | Snap start point to `1 mm`, physical length to `1 mm`, and angle to configured increment + cardinal axes |
@@ -574,8 +606,9 @@
 | `Ctrl / Cmd + G` | Group selected objects (`2+` objects) |
 | `Ctrl / Cmd + Shift + G` | Ungroup selected group entity |
 | `Ctrl / Cmd + L` | Lock / Unlock selected object(s) |
+| `Ctrl / Cmd + X` | Cut selected unlocked object(s) or group to the clipboard |
 | `Ctrl / Cmd + C` | Copy selected object(s) or group |
-| `Ctrl / Cmd + V` | Paste image from system clipboard (e.g. screenshot) or paste copied PageLay object(s) |
+| `Ctrl / Cmd + V` | Paste image from system clipboard (e.g. screenshot) or paste cut/copied PageLay object(s) |
 | `Ctrl / Cmd + D` | Duplicate selected object |
 | `Delete` / `Backspace` | Delete selected object(s) or selected guideline |
 | `Arrow Keys` | Nudge selected object(s) by `1 mm` (`10 mm` with `Shift`) |
@@ -590,7 +623,7 @@
 | :--- | :--- | :---: | :--- |
 | Canonical `mm` Data Model | `src/model/documentTypes.ts`, `src/utils/units.ts` | Verified | ISO A0–A4 + Custom sizes, `GroupObject`, `FreehandStrokeObject`, DPI math |
 | Zoom-Invariant Canvas | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1:1 `mm` layout scaled via GPU compositor + curved `.cursor-rotate-handle` SVG cursor |
-| Clipboard Image Paste & Multi-Object Copy/Paste | `src/services/clipboardService.ts`, `src/App.tsx` | Verified | Native `paste`/`copy` events, screenshot/PNG/JPEG/WebP paste, system clipboard priority, multi-object/group & cross-document asset paste |
+| Clipboard Image Paste & Multi-Object Cut/Copy/Paste | `src/services/clipboardService.ts`, `src/App.tsx` | Verified | Native `paste`/`copy`/`cut` events, screenshot/PNG/JPEG/WebP paste, system clipboard priority, locked-object guard, multi-object/group & cross-document asset cut/paste |
 | Mobile Touch & Pinch Zoom | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1-finger pan, 2-finger pinch zoom & focal pan, multi-touch stroke cancel |
 | Desktop Mouse Wheel Navigation | `src/components/EditorCanvas.tsx` | Verified | `Wheel` vertical pan, `Alt+Wheel` horizontal pan, `Shift+Wheel` pointer-centred zoom, `Ctrl+Wheel` native browser zoom |
 | Responsive Drawing Tools Ribbon | `src/components/TopToolbar.tsx` | Verified | Desktop-only overflow detection, docked left/right scroll arrows, edge fades, vertical mouse-wheel horizontal scroll, mobile touch-scroll preserved |
@@ -600,7 +633,7 @@
 | Configurable Angle & Linear `1 mm` Precision | `src/components/EditorCanvas.tsx`, `src/components/TopToolbar.tsx`, `src/components/PropertiesPanel.tsx` | Verified | `1°–45°` angle snap, `1 mm` line start & length snap + trigonometric endpoint precision, `1 mm` guide snap, Touch Precision Mode |
 | Freehand Pen, Highlighter & Eraser | `src/components/TopToolbar.tsx`, `src/components/EditorCanvas.tsx`, `src/services/pdfExportService.ts` | Verified | Snipping Tool-style colour/thickness popovers, smooth `mm` vector paths, whole-stroke Eraser |
 | Page Alignment Controls | `src/components/PropertiesPanel.tsx` | Verified | Left, Center H, Right, Top, Center V, Bottom, Center Both |
-| Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx` | Verified | `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
+| Multi-Select & Grouping | `src/App.tsx`, `src/components/PropertiesPanel.tsx`, `src/components/EditorCanvas.tsx`, `src/utils/units.ts` | Verified | Right-drag CAD Window/Crossing selection (rotated/shape/freehand/group geometry), `Ctrl/⌘ + Click` multi-select, synchronized move, resize, rotate, align |
 | Undo/Redo & Keyboard Shortcuts Suite | `src/App.tsx`, `src/components/EditorCanvas.tsx` | Verified | Pre-drag history snapshots, Undo (`Ctrl+Z`), Redo (`Ctrl+Y`/`Ctrl+Shift+Z`), Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), Select All (`Ctrl+A`), Lock (`Ctrl+L`), Group (`Ctrl+G`) |
 | `.lay` Archive Save / Save As / Open & Page Import | `src/services/layFileService.ts`, `src/components/PagesSidebar.tsx`, `src/components/Modals.tsx` | Verified | `FileSystemFileHandle` in-place overwrite, `showOpenFilePicker`, lossless `Uint8Array` asset preservation, sidebar `.lay` page import |
 | Open Recent Documents (Max 10) | `src/services/recentFilesService.ts`, `src/components/TopToolbar.tsx`, `src/components/Modals.tsx`, `src/App.tsx` | Verified | 3-tier quick reopen: 1. `FileSystemFileHandle`, 2. Cached `.lay` Blob in `pagelay_recent_files_v1` / `recent_blobs`, 3. `ReopenRecentModal` picker |
