@@ -1518,9 +1518,14 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </button>
 
           <div className="flex items-center gap-1.5 pr-1 sm:pr-1.5 border-r border-slate-200 shrink-0">
-            <div className="w-6 h-6 rounded bg-slate-900 text-white flex items-center justify-center font-bold text-[11px] tracking-tight">
-              PL
-            </div>
+            <img
+              src="/pagelay-logo.png"
+              alt="PageLay"
+              width={24}
+              height={24}
+              draggable={false}
+              className="w-6 h-6 object-contain shrink-0 select-none pointer-events-none"
+            />
             <span className="hidden lg:inline font-bold text-sm tracking-tight text-slate-900 whitespace-nowrap">
               PageLay
             </span>

@@ -584,6 +584,17 @@
   - **3. Cross-Page & Cross-Document Pasting**:
     - Preserves cut assets and objects across the same page, other pages, and newly created/opened documents within the same PageLay session using the existing `prepareInternalPasteFromPayload` placement and offset workflow.
 
+### Milestone 37 — Final Logo Integration
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Final Logo Integration (Milestone 37)"*
+- **Engineering Changes**:
+  - **1. Top Toolbar Brand Icon (`src/components/TopToolbar.tsx`)**:
+    - Replaced the placeholder dark `PL` badge (`<div>`) in the top toolbar with the approved `/pagelay-logo.png` artwork rendered at `24 × 24 px` (`w-6 h-6 object-contain shrink-0 select-none pointer-events-none`, `draggable={false}`), preserving the `PageLay` wordmark beside it along with existing toolbar height (`h-11`), alignment, spacing, and mobile/tablet/desktop responsive visibility.
+  - **2. Approved Favicon & Icon Assets Verification (`index.html`, `/public`)**:
+    - Verified `index.html` references `/favicon.ico` (`sizes="any"`), `/favicon.svg` (`type="image/svg+xml"`), and `/apple-touch-icon.png`.
+    - Verified all approved branding assets in `/public` remain intact without artwork modification or PWA manifest activation (`pagelay-logo.png`, `favicon.ico`, `favicon.svg`, `apple-touch-icon.png`, `pagelay-icon-192.png`, `pagelay-icon-512.png`, `pagelay-icon-maskable-512.png`).
+
 ## 3. Keyboard & Mouse Shortcuts Reference
 
 | Shortcut | Action |
@@ -621,6 +632,7 @@
 
 | Subsystem | Key Files | Status | Notes |
 | :--- | :--- | :---: | :--- |
+| Branding, Logo & Favicons | `public/*`, `index.html`, `src/components/TopToolbar.tsx` | Verified | Approved `/pagelay-logo.png` (`24×24 px`) in top toolbar, `/favicon.ico`, `/favicon.svg`, `/apple-touch-icon.png`, and preserved `192`/`512`/`maskable-512` PNG icons |
 | Canonical `mm` Data Model | `src/model/documentTypes.ts`, `src/utils/units.ts` | Verified | ISO A0–A4 + Custom sizes, `GroupObject`, `FreehandStrokeObject`, DPI math |
 | Zoom-Invariant Canvas | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1:1 `mm` layout scaled via GPU compositor + curved `.cursor-rotate-handle` SVG cursor |
 | Clipboard Image Paste & Multi-Object Cut/Copy/Paste | `src/services/clipboardService.ts`, `src/App.tsx` | Verified | Native `paste`/`copy`/`cut` events, screenshot/PNG/JPEG/WebP paste, system clipboard priority, locked-object guard, multi-object/group & cross-document asset cut/paste |
