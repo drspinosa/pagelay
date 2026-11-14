@@ -2476,7 +2476,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                           initialObject: obj,
                         });
                       }}
-                      className="absolute left-1/2 bg-white rounded-full cursor-grab pointer-events-auto shadow-sm"
+                      className="absolute left-1/2 bg-white rounded-full cursor-rotate-handle pointer-events-auto shadow-sm"
                       style={{
                         top: -22 * invZoom,
                         marginLeft: -halfHandlePagePx,
@@ -3155,7 +3155,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                       initialObject: obj,
                     });
                   }}
-                  className="absolute left-1/2 bg-white rounded-full cursor-grab pointer-events-auto shadow-sm"
+                  className="absolute left-1/2 bg-white rounded-full cursor-rotate-handle pointer-events-auto shadow-sm"
                   style={{
                     top: -24 * invZoom,
                     marginLeft: -halfHandlePagePx,
@@ -3611,7 +3611,7 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
                     initialObject: obj,
                   });
                 }}
-                className="absolute left-1/2 bg-white rounded-full cursor-grab pointer-events-auto shadow-sm"
+                className="absolute left-1/2 bg-white rounded-full cursor-rotate-handle pointer-events-auto shadow-sm"
                 style={{
                   top: -24 * invZoom,
                   marginLeft: -halfHandlePagePx,
@@ -3753,7 +3753,9 @@ export const EditorCanvas: React.FC<EditorCanvasProps> = ({
       }}
       data-workspace-canvas="true"
       className={`workspace-canvas relative flex-1 bg-slate-200/85 overflow-hidden overscroll-none touch-none select-none ${
-        isSpacePressed || activeTool === 'pan' || interaction?.mode === 'panning'
+        interaction?.mode === 'rotating-object'
+          ? 'cursor-rotate-handle'
+          : isSpacePressed || activeTool === 'pan' || interaction?.mode === 'panning'
           ? 'cursor-grab active:cursor-grabbing'
           : activeTool === 'eraser'
           ? 'cursor-cell'

@@ -541,13 +541,19 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
       {
         id: 'importing-and-cropping-images',
         sectionId: 'images-and-objects',
-        title: 'Importing Images and Non-Destructive Cropping',
+        title: 'Importing, Pasting Images and Non-Destructive Cropping',
         summary:
-          'Import JPEG, PNG or WebP images without recompression and crop them non-destructively.',
+          'Import or paste JPEG, PNG or WebP images from your clipboard without recompression and crop them non-destructively.',
         keywords: [
           'image',
           'import image',
           'upload',
+          'paste image',
+          'clipboard',
+          'screenshot',
+          'snipping tool',
+          'ctrl v',
+          'cmd v',
           'jpeg',
           'png',
           'webp',
@@ -557,11 +563,18 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
           'aspect ratio',
         ],
         steps: [
-          'Click Image in the drawing ribbon (or drag and drop JPEG, PNG or WebP files from your computer directly onto the canvas).',
-          'PageLay stores the untouched original binary image bytes in memory so no quality is lost.',
+          'Click Image in the drawing ribbon, drag and drop JPEG, PNG or WebP files from your computer directly onto the canvas, or press Ctrl / ⌘ + V to paste a screenshot or image copied from Windows Snipping Tool, Word, PowerPoint, a web browser or another app.',
+          'Pasted clipboard images are placed near the centre of your currently visible page area at their original pixel resolution (PNG, JPEG and WebP bytes are kept untouched; BMP or GIF screenshots are converted losslessly to PNG).',
           'To crop an image, double-click the image on the canvas — or select it and click Crop Image in the Properties panel.',
           'Drag the amber corner or edge handles to frame the visible region while seeing the full original image ghosted in context.',
           'Click Done Cropping in the floating banner (or press Escape) to apply the crop. You can click Reset Full Image in Properties at any time to restore the uncropped image.',
+        ],
+        callouts: [
+          {
+            type: 'note',
+            title: 'System clipboard priority and unsupported items',
+            text: 'If you copy an image or screenshot in another application, pressing Ctrl / ⌘ + V pastes that system clipboard image even if you previously copied an object inside PageLay. If the clipboard only holds plain text or an unsupported format, PageLay leaves your layout untouched and displays a helpful notice (double-click a Text box first if you want to paste wording).',
+          },
         ],
       },
       {
@@ -591,13 +604,17 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
       {
         id: 'selecting-grouping-and-locking',
         sectionId: 'images-and-objects',
-        title: 'Multi-Selection, Grouping and Locking Objects',
+        title: 'Multi-Selection, Copy & Paste, Grouping and Locking Objects',
         summary:
-          'Select multiple objects, combine them into a group entity, or lock objects in place.',
+          'Select multiple objects, copy and paste across pages or documents, combine objects into groups, or lock them in place.',
         keywords: [
           'select multiple',
           'multi-select',
           'marquee',
+          'copy',
+          'paste',
+          'clipboard',
+          'cross-document',
           'group',
           'ungroup',
           'lock',
@@ -607,6 +624,7 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
         bullets: [
           'Multi-Select on Canvas: With the Select tool active, drag a selection box across multiple objects, or hold Ctrl (Windows/Linux), Command ⌘ (Mac) or Shift while clicking objects.',
           'Multi-Select in Properties: When no object (or multiple objects) are selected, use the Page Objects checklist in the Properties panel to tick or untick objects.',
+          'Copy & Paste Objects (Ctrl/Cmd + C, Ctrl/Cmd + V): Copy any single object, multi-selection or group and paste onto the same page, another page, or even another document opened in the same session. Relative positions, properties, grouping and original image assets are preserved automatically, and pasting multiple objects records a single Undo step.',
           'Group Objects (Ctrl/Cmd + G): With 2 or more objects selected, click Group Objects in the floating canvas badge or Properties panel. Moving, resizing, rotating or aligning a group transforms all member objects together in millimetres.',
           'Ungroup (Ctrl/Cmd + Shift + G): Select a group and click Ungroup to restore the individual objects at their current positions.',
           'Lock / Unlock (Ctrl/Cmd + L): Lock any object or selection in the Properties panel so it cannot be accidentally moved, resized or deleted until unlocked.',
@@ -968,8 +986,15 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
             keys: 'Ctrl / ⌘ + L',
             action: 'Lock or unlock selected object(s)',
           },
-          { keys: 'Ctrl / ⌘ + C', action: 'Copy selected object' },
-          { keys: 'Ctrl / ⌘ + V', action: 'Paste copied object' },
+          {
+            keys: 'Ctrl / ⌘ + C',
+            action: 'Copy selected object(s) or group',
+          },
+          {
+            keys: 'Ctrl / ⌘ + V',
+            action:
+              'Paste clipboard image from another app, or paste copied PageLay object(s)',
+          },
           { keys: 'Ctrl / ⌘ + D', action: 'Duplicate selected object' },
           {
             keys: 'Delete / Backspace',
@@ -1041,6 +1066,7 @@ export const HELP_SECTIONS: ReadonlyArray<HelpSection> = [
           'Why will an object not move or delete? Check whether the object or guideline is locked. Select the object and look for the Unlock button in the Properties panel (or press Ctrl/Cmd + L). If a guideline will not move, open Guides & Snap and untick Lock Guidelines.',
           'Why does the Eraser not remove a line, shape or text box? By design, the Eraser only removes freehand Pen and Highlighter strokes so you do not accidentally wipe out underlying plans or layout boxes while erasing annotations. To delete other objects, select them with the Select tool and press Delete / Backspace (or tap the floating Trash button).',
           'Why did Export warn about non-standard fonts? Standard PDF viewers only guarantee built-in support for Helvetica, Times Roman and Courier. Click Convert All Text Boxes to Standard PDF Fonts in the Export PDF dialogue to convert system fonts automatically before exporting.',
+          'Why did pressing Ctrl / ⌘ + V say the clipboard does not contain a supported image? Direct canvas paste supports binary image data from screenshots and image-copy commands (PNG, JPEG, WebP, BMP, GIF) or PageLay copied objects. If you copied plain text or a remote web image link without image data, use the Text tool (double-click a text box) to paste text, or save and import the image file directly.',
         ],
       },
     ],

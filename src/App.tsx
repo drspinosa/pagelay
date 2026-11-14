@@ -84,6 +84,12 @@ import {
   tryReopenRecentDocument,
   tryReopenRecentFromCachedBlob,
 } from './services/recentFilesService';
+import {
+  createPageLayClipboardPayload,
+  inspectSystemClipboardForPaste,
+  PageLayClipboardPayload,
+  prepareInternalPasteFromPayload,
+} from './services/clipboardService';
 
 type PendingReplacementAction =
   | { type: 'open-new-modal' }
@@ -205,8 +211,12 @@ export default function App() {
   const documentSessionGenRef = useRef<number>(0);
   const hasUserReplacedOrEditedDocRef = useRef<boolean>(false);
 
-  // Clipboard for Copy / Paste
-  const [clipboardObject, setClipboardObject] = useState<PageObject | null>(null);
+  const viewportViewRef = useRef({ zoom, panX, panY });
+  viewportViewRef.current = { zoom, panX, panY };
+
+  // Clipboard for Copy / Paste (supports multi-object/group copy + cross-document asset preservation)
+  const clipboardPayloadRef = useRef<PageLayClipboardPayload | null>(null);
+  const lastKeydownCopyTimestampRef = useRef<number>(0);
 
   // Modals & Notifications
   const [isNewModalOpen, setIsNewModalOpen] = useState<boolean>(false);
@@ -1755,18 +1765,8 @@ export default function App() {
         return;
       }
 
-      // Paste copied object (Ctrl/Cmd + V) — works even when no object is currently selected
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && (keyLower === 'v' || e.code === 'KeyV')) {
-        if (clipboardObject) {
-          e.preventDefault();
-          const pasted = cloneObject(
-            clipboardObject,
-            Math.max(8, Math.round(doc.widthMm * 0.015))
-          );
-          handleAddObject(pasted);
-        }
-        return;
-      }
+      // Paste (Ctrl/Cmd + V) is handled by the native window `paste` listener below
+      // so real system clipboard images always take priority over older internal copies.
 
       // Escape: cancel active text editing/cropping, reset tool to Select, or deselect active selection
       if (e.key === 'Escape') {
@@ -1803,12 +1803,29 @@ export default function App() {
 
       if (!selectedObject && selectedObjectIds.length === 0) return;
 
-      // Copy selected object (Ctrl/Cmd + C)
+      // Copy selected object(s) (Ctrl/Cmd + C):
+      // Do NOT call preventDefault() so the native browser `copy` event also fires and
+      // tags the system clipboard with PageLay's copy marker (superseding any older screenshot).
       if ((e.ctrlKey || e.metaKey) && !e.altKey && (keyLower === 'c' || e.code === 'KeyC')) {
-        if (selectedObject) {
-          e.preventDefault();
-          setClipboardObject(selectedObject);
-          showToast(`Copied "${selectedObject.name}"`);
+        const targetIds =
+          selectedObjectIds.length > 0
+            ? new Set(selectedObjectIds)
+            : selectedObject
+            ? new Set([selectedObject.id])
+            : new Set<string>();
+        const targets = currentPage.objects.filter((o) => targetIds.has(o.id));
+        if (targets.length > 0) {
+          clipboardPayloadRef.current = createPageLayClipboardPayload(
+            targets,
+            docRef.current.assets,
+            currentPage.id
+          );
+          lastKeydownCopyTimestampRef.current = Date.now();
+          showToast(
+            targets.length === 1
+              ? `Copied "${targets[0].name}"`
+              : `Copied ${targets.length} objects`
+          );
         }
         return;
       }
@@ -1854,6 +1871,7 @@ export default function App() {
     doc.widthMm,
     doc.lockGuides,
     activePageIndex,
+    currentPage.id,
     currentPage.objects,
     selectedObject,
     selectedObjectIds,
@@ -1862,7 +1880,6 @@ export default function App() {
     editingTextId,
     croppingImageId,
     activeTool,
-    clipboardObject,
     isRecoveryModalOpen,
     isNewModalOpen,
     isSaveAsModalOpen,
@@ -1880,7 +1897,6 @@ export default function App() {
     handleDeleteObject,
     handleDeleteSelected,
     handleDuplicateObject,
-    handleAddObject,
     handleUpdateObject,
     handleUpdateMultipleObjects,
     showToast,
@@ -2459,12 +2475,48 @@ export default function App() {
     [pushHistory, markDirty, showToast]
   );
 
+  const getVisiblePageCenterMm = useCallback((): { x: number; y: number } => {
+    const currentDoc = docRef.current;
+    const el = workspaceRef.current;
+    const { zoom: curZoom, panX: curPanX, panY: curPanY } =
+      viewportViewRef.current;
+    if (el && curZoom > 0) {
+      const viewportW = Math.max(120, el.clientWidth - RULER_THICKNESS_PX);
+      const viewportH = Math.max(120, el.clientHeight - RULER_THICKNESS_PX);
+      const viewLeftMm = (0 - curPanX) / (CSS_PX_PER_MM_AT_100 * curZoom);
+      const viewRightMm =
+        (viewportW - curPanX) / (CSS_PX_PER_MM_AT_100 * curZoom);
+      const viewTopMm = (0 - curPanY) / (CSS_PX_PER_MM_AT_100 * curZoom);
+      const viewBottomMm =
+        (viewportH - curPanY) / (CSS_PX_PER_MM_AT_100 * curZoom);
+      const visLeft = Math.max(0, viewLeftMm);
+      const visRight = Math.min(currentDoc.widthMm, viewRightMm);
+      const visTop = Math.max(0, viewTopMm);
+      const visBottom = Math.min(currentDoc.heightMm, viewBottomMm);
+      if (visRight > visLeft + 1 && visBottom > visTop + 1) {
+        return {
+          x: (visLeft + visRight) / 2,
+          y: (visTop + visBottom) / 2,
+        };
+      }
+    }
+    return {
+      x: currentDoc.widthMm / 2,
+      y: currentDoc.heightMm / 2,
+    };
+  }, []);
+
   /**
-   * Handles importing one or more image files (or a dropped .lay file on the canvas) while preserving 100% original bytes.
+   * Handles importing one or more image files (from file picker, canvas drag-and-drop, or clipboard paste)
+   * while preserving 100% original bytes and pixel dimensions.
    * Dropped `.lay` files on the canvas pass through the centralised unsaved-changes guard before replacing the document.
    */
   const handleFilesImported = useCallback(
-    async (files: File[] | FileList, dropMm?: { x: number; y: number }) => {
+    async (
+      files: File[] | FileList,
+      dropMm?: { x: number; y: number },
+      options?: { source?: 'drop' | 'picker' | 'clipboard' }
+    ) => {
       const fileArray = Array.from(files);
       if (fileArray.length === 0) return;
 
@@ -2474,42 +2526,42 @@ export default function App() {
         return;
       }
 
-      const currentDoc = docRef.current;
-      const newAssets = { ...currentDoc.assets };
+      const initialDoc = docRef.current;
+      const importedAssets: Record<string, (typeof initialDoc.assets)[string]> = {};
       const newImageObjects: ImageObject[] = [];
 
       for (let i = 0; i < fileArray.length; i++) {
         const file = fileArray[i];
         try {
           const asset = await importImageFileToAsset(file);
-          newAssets[asset.id] = asset;
+          importedAssets[asset.id] = asset;
 
           const aspect = asset.widthPx / Math.max(1, asset.heightPx);
-          let placedW = formatMm(currentDoc.widthMm * 0.38, 1);
+          let placedW = formatMm(initialDoc.widthMm * 0.38, 1);
           let placedH = formatMm(placedW / aspect, 1);
-          if (placedH > currentDoc.heightMm * 0.65) {
-            placedH = formatMm(currentDoc.heightMm * 0.65, 1);
+          if (placedH > initialDoc.heightMm * 0.65) {
+            placedH = formatMm(initialDoc.heightMm * 0.65, 1);
             placedW = formatMm(placedH * aspect, 1);
           }
 
           const baseX = dropMm
             ? Math.max(
                 0,
-                Math.min(currentDoc.widthMm - placedW, dropMm.x - placedW / 2)
+                Math.min(initialDoc.widthMm - placedW, dropMm.x - placedW / 2)
               )
-            : (currentDoc.widthMm - placedW) / 2;
+            : (initialDoc.widthMm - placedW) / 2;
           const baseY = dropMm
             ? Math.max(
                 0,
-                Math.min(currentDoc.heightMm - placedH, dropMm.y - placedH / 2)
+                Math.min(initialDoc.heightMm - placedH, dropMm.y - placedH / 2)
               )
-            : (currentDoc.heightMm - placedH) / 2;
+            : (initialDoc.heightMm - placedH) / 2;
 
           const offsetMm = i * 20;
           const imgObj: ImageObject = {
             id: generateId('image'),
             type: 'image',
-            name: file.name.replace(/\.[^.]+$/, ''),
+            name: file.name.replace(/\.[^.]+$/, '') || 'Pasted Image',
             assetId: asset.id,
             xMm: formatMm(baseX + offsetMm, 1),
             yMm: formatMm(baseY + offsetMm, 1),
@@ -2532,12 +2584,14 @@ export default function App() {
       }
 
       if (newImageObjects.length > 0) {
+        const currentDoc = docRef.current;
+        const targetIdx = activePageIndexRef.current;
         pushHistory(currentDoc);
         const nextDoc: PageLayDocument = {
           ...currentDoc,
-          assets: newAssets,
+          assets: { ...currentDoc.assets, ...importedAssets },
           pages: currentDoc.pages.map((p, idx) =>
-            idx === activePageIndex
+            idx === targetIdx
               ? { ...p, objects: [...p.objects, ...newImageObjects] }
               : p
           ),
@@ -2545,20 +2599,215 @@ export default function App() {
         };
         docRef.current = nextDoc;
         setDoc(nextDoc);
-        const lastNewId = newImageObjects[newImageObjects.length - 1].id;
-        setSelectedObjectId(lastNewId);
-        setSelectedObjectIds([lastNewId]);
+        const newIds = newImageObjects.map((o) => o.id);
+        setSelectedObjectIds(newIds);
+        setSelectedObjectId(newIds[newIds.length - 1]);
+        setSelectedGuideId(null);
+        setCroppingImageId(null);
+        setEditingTextId(null);
         setActiveTool('select');
         markDirty();
-        showToast(
-          `Imported ${newImageObjects.length} image${
-            newImageObjects.length > 1 ? 's' : ''
-          } (Original resolution preserved)`
-        );
+        if (options?.source === 'clipboard') {
+          showToast(
+            newImageObjects.length === 1
+              ? `Pasted "${newImageObjects[0].name}" (${importedAssets[newImageObjects[0].assetId].widthPx} × ${importedAssets[newImageObjects[0].assetId].heightPx} px)`
+              : `Pasted ${newImageObjects.length} images (Original resolution preserved)`
+          );
+        } else {
+          showToast(
+            `Imported ${newImageObjects.length} image${
+              newImageObjects.length > 1 ? 's' : ''
+            } (Original resolution preserved)`
+          );
+        }
       }
     },
-    [activePageIndex, pushHistory, markDirty, requestDocumentReplacement, showToast]
+    [pushHistory, markDirty, requestDocumentReplacement, showToast]
   );
+
+  // Native clipboard Copy / Paste listeners:
+  // - System clipboard images (Snipping Tool, screenshots, Word, PowerPoint, browsers) take priority over internal copies.
+  // - Supports single & multi-object/group internal PageLay copy/paste with preserved assets across pages and documents.
+  // - Never intercepts normal copy/paste when typing inside inputs, text boxes, Help search, or modal fields.
+  useEffect(() => {
+    const isModalBlockingClipboard = () =>
+      isRecoveryModalOpen ||
+      isNewModalOpen ||
+      isSaveAsModalOpen ||
+      isUnsavedModalOpen ||
+      reopenRecentModalState.isOpen ||
+      exportModalState.isOpen ||
+      (isHelpOpen && typeof window !== 'undefined' && window.innerWidth < 1024);
+
+    const isEditableElement = (el: HTMLElement | null): boolean => {
+      if (!el) return false;
+      const tag = el.tagName;
+      return (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        Boolean(el.isContentEditable)
+      );
+    };
+
+    const hasUserDomTextSelection = (): boolean => {
+      const sel = window.getSelection?.();
+      return Boolean(sel && !sel.isCollapsed && sel.toString().length > 0);
+    };
+
+    const onCopy = (e: ClipboardEvent) => {
+      if (isModalBlockingClipboard()) return;
+      const targetEl = e.target as HTMLElement | null;
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (isEditableElement(targetEl) || isEditableElement(activeEl)) return;
+      if (hasUserDomTextSelection()) return;
+
+      const curDoc = docRef.current;
+      const curPage = curDoc.pages[activePageIndexRef.current] || curDoc.pages[0];
+      if (!curPage) return;
+
+      const idSet = new Set(
+        selectedObjectIds.length > 0
+          ? selectedObjectIds
+          : selectedObjectId
+          ? [selectedObjectId]
+          : []
+      );
+      if (idSet.size === 0) return;
+
+      const targets = curPage.objects.filter((o) => idSet.has(o.id));
+      if (targets.length === 0) return;
+
+      const justCopiedViaKeydown =
+        Date.now() - lastKeydownCopyTimestampRef.current < 250 &&
+        clipboardPayloadRef.current !== null;
+
+      const payload =
+        justCopiedViaKeydown && clipboardPayloadRef.current
+          ? clipboardPayloadRef.current
+          : createPageLayClipboardPayload(targets, curDoc.assets, curPage.id);
+
+      clipboardPayloadRef.current = payload;
+
+      if (e.clipboardData) {
+        try {
+          e.preventDefault();
+          e.clipboardData.setData('application/x-pagelay-clip', payload.clipId);
+          e.clipboardData.setData(
+            'text/html',
+            `<span data-pagelay-clip="${payload.clipId}"></span>`
+          );
+          e.clipboardData.setData('text/plain', payload.plainTextSummary);
+          payload.wroteToSystemClipboard = true;
+        } catch {
+          payload.wroteToSystemClipboard = false;
+        }
+      }
+
+      if (!justCopiedViaKeydown) {
+        showToast(
+          targets.length === 1
+            ? `Copied "${targets[0].name}"`
+            : `Copied ${targets.length} objects`
+        );
+      }
+    };
+
+    const onPaste = (e: ClipboardEvent) => {
+      if (isModalBlockingClipboard()) return;
+      const targetEl = e.target as HTMLElement | null;
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (isEditableElement(targetEl) || isEditableElement(activeEl)) return;
+
+      e.preventDefault();
+      const clipboardData = e.clipboardData;
+
+      void (async () => {
+        const inspection = await inspectSystemClipboardForPaste(
+          clipboardData,
+          clipboardPayloadRef.current
+        );
+
+        if (inspection.kind === 'images') {
+          const centerMm = getVisiblePageCenterMm();
+          await handleFilesImported(inspection.files, centerMm, {
+            source: 'clipboard',
+          });
+          return;
+        }
+
+        if (inspection.kind === 'pagelay-internal') {
+          const payload = clipboardPayloadRef.current;
+          if (!payload || payload.objects.length === 0) return;
+
+          const currentDoc = docRef.current;
+          const targetIdx = activePageIndexRef.current;
+          const { pastedObjects, mergedAssets, nextPasteCount } =
+            prepareInternalPasteFromPayload(payload, currentDoc);
+
+          clipboardPayloadRef.current = {
+            ...payload,
+            pasteCount: nextPasteCount,
+          };
+
+          pushHistory(currentDoc);
+          const nextDoc: PageLayDocument = {
+            ...currentDoc,
+            assets: mergedAssets,
+            pages: currentDoc.pages.map((p, idx) =>
+              idx === targetIdx
+                ? { ...p, objects: [...p.objects, ...pastedObjects] }
+                : p
+            ),
+            updatedAt: new Date().toISOString(),
+          };
+          docRef.current = nextDoc;
+          setDoc(nextDoc);
+
+          const pastedIds = pastedObjects.map((o) => o.id);
+          setSelectedObjectIds(pastedIds);
+          setSelectedObjectId(pastedIds[pastedIds.length - 1] ?? null);
+          setSelectedGuideId(null);
+          setCroppingImageId(null);
+          setEditingTextId(null);
+          setActiveTool('select');
+          markDirty();
+          showToast(
+            pastedObjects.length === 1
+              ? `Pasted "${pastedObjects[0].name}"`
+              : `Pasted ${pastedObjects.length} objects`
+          );
+          return;
+        }
+
+        if (inspection.kind === 'unsupported') {
+          showToast(inspection.reason, 'info');
+        }
+      })();
+    };
+
+    window.addEventListener('copy', onCopy);
+    window.addEventListener('paste', onPaste);
+    return () => {
+      window.removeEventListener('copy', onCopy);
+      window.removeEventListener('paste', onPaste);
+    };
+  }, [
+    selectedObjectId,
+    selectedObjectIds,
+    isRecoveryModalOpen,
+    isNewModalOpen,
+    isSaveAsModalOpen,
+    isUnsavedModalOpen,
+    reopenRecentModalState.isOpen,
+    exportModalState.isOpen,
+    isHelpOpen,
+    getVisiblePageCenterMm,
+    handleFilesImported,
+    pushHistory,
+    markDirty,
+    showToast,
+  ]);
 
   return (
     <div

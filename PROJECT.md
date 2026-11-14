@@ -538,6 +538,21 @@
   - Optional annotated Help illustrations.
   - Continued refinement based on user feedback.
 
+### Milestone 34 — Clipboard Image Paste, Multi-Object Copy/Paste & Rotation Cursor
+- **Status**: Completed
+- **User Request Addressed**:
+  - *"PageLay — Clipboard Image Paste and Rotation Cursor Refinement"*
+- **Engineering Changes**:
+  - **1. Native Browser Clipboard Image Paste (`src/services/clipboardService.ts`, `src/App.tsx`)**:
+    - Added native `window` `paste` and `copy` event handling without blocking `Ctrl/⌘ + V` or `Ctrl/⌘ + C` in `keydown`, allowing browser clipboard payloads (such as Windows Snipping Tool `Win+Shift+S`, screenshots, Word/PowerPoint, and browser image copies) to be read directly without extra permission prompts.
+    - Supports untouched lossless ingestion of `image/png`, `image/jpeg`, and `image/webp` blobs (plus lossless BMP/GIF conversion to PNG and embedded `data:image/*` HTML images without remote network fetches), converts clipboard images into clean `File` objects (`Pasted Image YYYY-MM-DD HH-MM-SS.ext`), reuses `importImageFileToAsset` / `handleFilesImported`, places images centred in the visible page area at original pixel dimensions, records 1 Undo entry, and marks the document dirty for `.lay` save and IndexedDB recovery.
+    - Provides clear, non-destructive toast feedback for unsupported clipboard contents (plain text, remote-only image links, or unsupported file types) without altering the document.
+  - **2. Multi-Object, Group & Cross-Document Copy/Paste (`src/services/clipboardService.ts`, `src/App.tsx`)**:
+    - Upgraded internal PageLay copy/paste from single-object only to support single objects, multi-selections, and nested `GroupObject` structures in Z-order, cloning referenced `ImageAsset` bytes safely so pasting across pages or across opened `.lay` documents preserves all images and generates unique IDs without broken links.
+    - Enforces system clipboard image priority whenever external image data is present on the clipboard, and bypasses PageLay clipboard handling whenever focus is inside inputs, textareas, text box editing, Help search, modal dialogues, or non-collapsed DOM text selections.
+  - **3. Curved Rotation-Arrow Handle Cursor (`src/index.css`, `src/components/EditorCanvas.tsx`)**:
+    - Added `.cursor-rotate-handle` custom high-contrast SVG curved rotation-arrow cursor (`24×24`, hotspot `12 12`, `, pointer` fallback) and applied it to all rotation handles (objects, groups, freehand strokes) and during active `rotating-object` drags, replacing the generic grab hand while retaining `cursor-move`, all 8 resize cursors, handle geometry, and `Shift` / Precision angle snapping unchanged.
+
 
 ## 3. Keyboard & Mouse Shortcuts Reference
 
@@ -559,8 +574,8 @@
 | `Ctrl / Cmd + G` | Group selected objects (`2+` objects) |
 | `Ctrl / Cmd + Shift + G` | Ungroup selected group entity |
 | `Ctrl / Cmd + L` | Lock / Unlock selected object(s) |
-| `Ctrl / Cmd + C` | Copy selected object |
-| `Ctrl / Cmd + V` | Paste copied object |
+| `Ctrl / Cmd + C` | Copy selected object(s) or group |
+| `Ctrl / Cmd + V` | Paste image from system clipboard (e.g. screenshot) or paste copied PageLay object(s) |
 | `Ctrl / Cmd + D` | Duplicate selected object |
 | `Delete` / `Backspace` | Delete selected object(s) or selected guideline |
 | `Arrow Keys` | Nudge selected object(s) by `1 mm` (`10 mm` with `Shift`) |
@@ -574,7 +589,8 @@
 | Subsystem | Key Files | Status | Notes |
 | :--- | :--- | :---: | :--- |
 | Canonical `mm` Data Model | `src/model/documentTypes.ts`, `src/utils/units.ts` | Verified | ISO A0–A4 + Custom sizes, `GroupObject`, `FreehandStrokeObject`, DPI math |
-| Zoom-Invariant Canvas | `src/components/EditorCanvas.tsx` | Verified | 1:1 `mm` layout scaled via GPU compositor |
+| Zoom-Invariant Canvas | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1:1 `mm` layout scaled via GPU compositor + curved `.cursor-rotate-handle` SVG cursor |
+| Clipboard Image Paste & Multi-Object Copy/Paste | `src/services/clipboardService.ts`, `src/App.tsx` | Verified | Native `paste`/`copy` events, screenshot/PNG/JPEG/WebP paste, system clipboard priority, multi-object/group & cross-document asset paste |
 | Mobile Touch & Pinch Zoom | `src/components/EditorCanvas.tsx`, `src/index.css` | Verified | 1-finger pan, 2-finger pinch zoom & focal pan, multi-touch stroke cancel |
 | Desktop Mouse Wheel Navigation | `src/components/EditorCanvas.tsx` | Verified | `Wheel` vertical pan, `Alt+Wheel` horizontal pan, `Shift+Wheel` pointer-centred zoom, `Ctrl+Wheel` native browser zoom |
 | Responsive Drawing Tools Ribbon | `src/components/TopToolbar.tsx` | Verified | Desktop-only overflow detection, docked left/right scroll arrows, edge fades, vertical mouse-wheel horizontal scroll, mobile touch-scroll preserved |
